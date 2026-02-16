@@ -40,15 +40,6 @@ void Carlson_StateMachine(void){
         break;
       case 150:                         //
         if(one_time){
-          P1OUT |= RED_LED;            // Change State of LED 4
-          P6OUT &= ~GRN_LED;           // Change State of LED 5
-
-          // Motor Control - Start moving forward to travel 5 inches
-          P6OUT |= R_FORWARD;          // Turn on right motor forward direction
-          P6OUT |= L_FORWARD;          // Turn on left motor forward direction
-          P6OUT &= ~R_REVERSE;         // Ensure right motor reverse is off
-          P6OUT &= ~L_REVERSE;         // Ensure left motor reverse is off
-
           one_time = 0;
         }
         break;
@@ -63,13 +54,6 @@ void Carlson_StateMachine(void){
         break;
       case  50:                        //
         if(one_time){
-          // Motor Control - Stop all motors after ~5 inch movement
-          // Motors run from count 150 to 50 = 100 time units
-          P6OUT &= ~R_FORWARD;         // Turn off right motor forward direction
-          P6OUT &= ~L_FORWARD;         // Turn off left motor forward direction
-          P6OUT &= ~R_REVERSE;         // Ensure right motor reverse remains off
-          P6OUT &= ~L_REVERSE;         // Ensure left motor reverse remains off
-
           one_time = 0;
         }
         break;                         //

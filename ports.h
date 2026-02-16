@@ -72,4 +72,5 @@
 #define P6_5                   (0x20) // 6.5
 #define GRN_LED                (0x40) // 6.6 GREEN LED
 
+void Init_Ports(void);
 

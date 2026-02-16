@@ -17,7 +17,8 @@ void Init_Conditions(void);
 // Interrupts
 void enable_interrupts(void);
 __interrupt void Timer0_B0_ISR(void);
-__interrupt void switch_interrupt(void);
+__interrupt void switch1_interrupt(void);
+__interrupt void switch2_interrupt(void);
 
 // Analog to Digital Converter
 
@@ -28,6 +29,7 @@ void Init_Clocks(void);
 void Init_LEDs(void);
 void IR_LED_control(char selection);
 void Backlite_control(char selection);
+void Carlson_StateMachine(void);
 
   // LCD
 void Display_Process(void);
@@ -128,3 +130,20 @@ void usleep10(unsigned int usec);
 void five_msec_sleep(unsigned int msec);
 void measure_delay(void);
 void out_control_words(void);
+void delay_ms(unsigned int ms);
+void start_shape_timer(void);
+unsigned int get_shape_time(void);
+void stop_shape_timer(void);
+
+// Shapes
+void Shapes_Process(void);
+void Circle_StateMachine(void);
+void Figure8_StateMachine(void);
+void Triangle_StateMachine(void);
+void start_shape(unsigned char shape);
+
+// Motor Control
+void stop_motors(void);
+void move_forward(unsigned int left_speed, unsigned int right_speed);
+void turn_right_pivot(unsigned int speed);
+void turn_left_pivot(unsigned int speed);
