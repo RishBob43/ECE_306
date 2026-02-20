@@ -1,7 +1,7 @@
 //------------------------------------------------------------------------------
-// Switch Processing with Shape Selection
-// SW1: Cycle through shapes (Circle -> Figure-8 -> Triangle -> Idle)
-// SW2: Execute selected shape
+// Switch Processing for SMCLK Control
+// SW1: Toggle P3.4 between GPIO and SMCLK output
+// SW2: Toggle SMCLK frequency between 8MHz and 500kHz
 //------------------------------------------------------------------------------
 
 #include "msp430.h"
@@ -15,15 +15,14 @@
 extern char display_line[4][11];
 extern char *display[4];
 extern volatile unsigned char display_changed;
-extern volatile unsigned char current_shape;
 
-// Switch variables - defined in globals.c
+// External SMCLK control variables
+extern volatile unsigned char smclk_output_enabled;
+extern volatile unsigned char smclk_freq_500k;
+
+// Switch press flags
 extern volatile unsigned char sw1_pressed;
 extern volatile unsigned char sw2_pressed;
-extern unsigned char selected_shape;
-
-// Debounce timing
-#define DEBOUNCE_TIME 200  // 200ms debounce
 
 //------------------------------------------------------------------------------
 // Initialize Switches
@@ -47,100 +46,101 @@ void Init_Switches(void) {
 }
 
 //------------------------------------------------------------------------------
-// Switch Interrupt Service Routine
+// Switch Interrupt Service Routines
 //------------------------------------------------------------------------------
 #pragma vector=PORT4_VECTOR
 __interrupt void switch1_interrupt(void) {
     if(P4IFG & SW1) {
+        // Debounce: Check if button is actually pressed (LOW)
+        if(!(P4IN & SW1)) {
+            sw1_pressed = 1;
+        }
         P4IFG &= ~SW1;      // Clear interrupt flag
-        P4IE &= ~SW1;       // Disable interrupt
-        sw1_pressed = 1;
     }
 }
 
 #pragma vector=PORT2_VECTOR
 __interrupt void switch2_interrupt(void) {
     if(P2IFG & SW2) {
+        // Debounce: Check if button is actually pressed (LOW)
+        if(!(P2IN & SW2)) {
+            sw2_pressed = 1;
+        }
         P2IFG &= ~SW2;      // Clear interrupt flag
-        P2IE &= ~SW2;       // Disable interrupt
-        sw2_pressed = 1;
     }
 }
 
 //------------------------------------------------------------------------------
-// Update display with selected shape
-//------------------------------------------------------------------------------
-void update_shape_display(void) {
-    strcpy(display_line[0], "SELECT:   ");
-
-    switch(selected_shape) {
-        case SHAPE_NONE:
-            strcpy(display_line[1], "  IDLE    ");
-            strcpy(display_line[2], " SW1:Next ");
-            strcpy(display_line[3], " SW2:Start");
-            break;
-
-        case SHAPE_CIRCLE:
-            strcpy(display_line[1], "  CIRCLE  ");
-            strcpy(display_line[2], " SW1:Next ");
-            strcpy(display_line[3], " SW2:Start");
-            break;
-
-        case SHAPE_FIGURE8:
-            strcpy(display_line[1], " FIGURE-8 ");
-            strcpy(display_line[2], " SW1:Next ");
-            strcpy(display_line[3], " SW2:Start");
-            break;
-
-        case SHAPE_TRIANGLE:
-            strcpy(display_line[1], " TRIANGLE ");
-            strcpy(display_line[2], " SW1:Next ");
-            strcpy(display_line[3], " SW2:Start");
-            break;
-    }
-
-    display_changed = TRUE;
-}
-
-//------------------------------------------------------------------------------
-// Process SW1 - Select Shape
+// Process SW1 - Toggle P3.4 between GPIO and SMCLK output
 //------------------------------------------------------------------------------
 void Switch1_Process(void) {
     if(sw1_pressed) {
         sw1_pressed = 0;
 
-        // Only allow shape selection when no shape is running
-        if(current_shape == SHAPE_NONE) {
-            // Cycle through shapes
-            selected_shape++;
-            if(selected_shape > SHAPE_TRIANGLE) {
-                selected_shape = SHAPE_NONE;
-            }
+        // Toggle SMCLK output on/off
+        if(smclk_output_enabled) {
+            // Turn OFF SMCLK output - make P3.4 GPIO
+            smclk_output_enabled = FALSE;
+            Init_Port3(USE_GPIO);
 
-            update_shape_display();
+            // Update display
+            strcpy(display_line[0], "P3.4:GPIO ");
+            display_changed = TRUE;
+
+            // Optional: Flash LED to indicate change
+            P1OUT ^= RED_LED;
+        } else {
+            // Turn ON SMCLK output
+            smclk_output_enabled = TRUE;
+            Init_Port3(USE_SMCLK);
+
+            // Update display
+            strcpy(display_line[0], "P3.4:SMCLK");
+            display_changed = TRUE;
+
+            // Optional: Flash LED to indicate change
+            P1OUT ^= RED_LED;
         }
 
-        // Re-enable interrupt after debounce
-        delay_ms(DEBOUNCE_TIME);
+        // Clear flag and re-enable interrupt
         P4IFG &= ~SW1;
         P4IE |= SW1;
     }
 }
 
 //------------------------------------------------------------------------------
-// Process SW2 - Execute Shape
+// Process SW2 - Toggle SMCLK frequency between 8MHz and 500kHz
 //------------------------------------------------------------------------------
 void Switch2_Process(void) {
     if(sw2_pressed) {
         sw2_pressed = 0;
 
-        // Only start shape if one is selected and none is running
-        if(selected_shape != SHAPE_NONE && current_shape == SHAPE_NONE) {
-            start_shape(selected_shape);
+        // Toggle SMCLK frequency
+        if(smclk_freq_500k) {
+            // Switch to 8MHz
+            smclk_freq_500k = FALSE;
+            Set_SMCLK_8MHz();
+
+            // Update display
+            strcpy(display_line[1], "FREQ:8MHz ");
+            display_changed = TRUE;
+
+            // Optional: Flash LED to indicate change
+            P6OUT ^= GRN_LED;
+        } else {
+            // Switch to 500kHz
+            smclk_freq_500k = TRUE;
+            Set_SMCLK_500kHz();
+
+            // Update display
+            strcpy(display_line[1], "FREQ:500kHz");
+            display_changed = TRUE;
+
+            // Optional: Flash LED to indicate change
+            P6OUT ^= GRN_LED;
         }
 
-        // Re-enable interrupt after debounce
-        delay_ms(DEBOUNCE_TIME);
+        // Clear flag and re-enable interrupt
         P2IFG &= ~SW2;
         P2IE |= SW2;
     }
@@ -155,7 +155,7 @@ void Switches_Process(void) {
 }
 
 //------------------------------------------------------------------------------
-// Enable switch interrupts
+// Enable/Disable switch interrupts (utility functions)
 //------------------------------------------------------------------------------
 void enable_switch_SW1(void) {
     P4IFG &= ~SW1;
@@ -167,9 +167,6 @@ void enable_switch_SW2(void) {
     P2IE |= SW2;
 }
 
-//------------------------------------------------------------------------------
-// Disable switch interrupts
-//------------------------------------------------------------------------------
 void disable_switch_SW1(void) {
     P4IE &= ~SW1;
 }

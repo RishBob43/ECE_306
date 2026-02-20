@@ -9,13 +9,15 @@
 #include "ports.h"
 #include "macros.h"
 
-// External variables
+// External variables - defined in globals.c
 extern volatile unsigned int Time_Sequence;
 extern volatile char one_time;
+
+// External variables - defined in LCD.c
 extern volatile unsigned int update_display_count;
 extern volatile unsigned char update_display;
 
-// Timing variables
+// Local timing variables - defined here
 volatile unsigned int msec_count = 0;
 volatile unsigned int shape_timer = 0;
 
@@ -23,16 +25,18 @@ volatile unsigned int shape_timer = 0;
 // Timer B0 initialization for 1ms interrupts
 //------------------------------------------------------------------------------
 void Init_Timer_B0(void) {
-    TB0CTL = TBSSEL__SMCLK;      // SMCLK source
+    TB0CTL = TBSSEL__SMCLK;      // SMCLK source (8MHz)
     TB0CTL |= TBCLR;             // Resets TB0R, clock divider, count direction
     TB0CTL |= MC__UP;            // Up mode
     TB0CTL |= ID__8;             // Divide clock by 8
     TB0EX0 = TBIDEX__8;          // Divide clock by an additional 8
-    TB0CCR0 = 1250;              // CCR0 - 1ms with 8MHz SMCLK/8/8 = 1000 interrupts/sec
+    // SMCLK/8/8 = 8MHz/64 = 125kHz
+    // For 1ms interrupt: 125kHz / 1000 Hz = 125 counts
+    TB0CCR0 = 125;               // CCR0 - 125 for true 1ms (1000 interrupts/sec)
     TB0CCTL0 |= CCIE;            // CCR0 enable interrupt
-    TB0CCR1 = 625;               // CCR1
+    TB0CCR1 = 62;                // CCR1 (half period)
     TB0CCTL1 &= ~CCIE;           // CCR1 disable interrupt
-    TB0CCR2 = 625;               // CCR2
+    TB0CCR2 = 62;                // CCR2 (half period)
     TB0CCTL2 &= ~CCIE;           // CCR2 disable interrupt
 }
 

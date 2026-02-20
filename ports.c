@@ -8,7 +8,7 @@
 void Init_Ports(void){
     Init_Port1();
     Init_Port2();
-    Init_Port3();
+    Init_Port3(USE_SMCLK);  // Change to USE_GPIO to disable SMCLK output
     Init_Port4();
     Init_Port5();
     Init_Port6();
@@ -114,51 +114,60 @@ void Init_Port2(void){
 
 //-----------------------------------------------------------
 
-void Init_Port3(void) {
+void Init_Port3(char smclk) {
     // Configure Port 3
     //---
-    P3OUT = 0x00;           // P2 set Low
-    P3DIR = 0x00;           // Set P2 direction to output
+    P3OUT = 0x00;           // P3 set Low
+    P3DIR = 0x00;           // Set P3 direction to input
 
-    P3SEL0 &= ~TEST_PROBE;    // SLOW_CLK GPIO operation
-    P3SEL1 &= ~TEST_PROBE ;    // SLOW_CIK GPIO operation
+    P3SEL0 &= ~TEST_PROBE;    // TEST_PROBE GPIO operation
+    P3SEL1 &= ~TEST_PROBE;    // TEST_PROBE GPIO operation
     P3OUT &= ~TEST_PROBE;     // Initial Value = Low / Off
     P3DIR &= ~TEST_PROBE;     // Direction = Input
 
-    P3SEL0 &= ~OA2O;   // CHECK_ BAT GPIO operation
-    P3SEL1 &= ~OA2O;   // CHECK BAT GPIO operation
+    P3SEL0 &= ~OA2O;   // OA2O GPIO operation
+    P3SEL1 &= ~OA2O;   // OA2O GPIO operation
     P3OUT &= ~OA2O;    // Initial Value = Low / Off
-    P3DIR &= ~OA2O;      // Direction = Input
+    P3DIR &= ~OA2O;    // Direction = Input
 
-    P3SEL0 &= ~OA2N;   // CHECK_ BAT GPIO operation
-    P3SEL1 &= ~OA2N;   // CHECK BAT GPIO operation
+    P3SEL0 &= ~OA2N;   // OA2N GPIO operation
+    P3SEL1 &= ~OA2N;   // OA2N GPIO operation
     P3OUT &= ~OA2N;    // Initial Value = Low / Off
-    P3DIR &= ~OA2N;      // Direction = Input
+    P3DIR &= ~OA2N;    // Direction = Input
 
-    P3SEL0 &= ~OA2P;   // CHECK_ BAT GPIO operation
-    P3SEL1 &= ~OA2P;   // CHECK BAT GPIO operation
+    P3SEL0 &= ~OA2P;   // OA2P GPIO operation
+    P3SEL1 &= ~OA2P;   // OA2P GPIO operation
     P3OUT &= ~OA2P;    // Initial Value = Low / Off
-    P3DIR &= ~OA2P;      // Direction = Input
+    P3DIR &= ~OA2P;    // Direction = Input
 
-    P3SEL0 &= ~SMCLK;   // CHECK_ BAT GPIO operation
-    P3SEL1 &= ~SMCLK;   // CHECK BAT GPIO operation
-    P3OUT &= ~SMCLK;    // Initial Value = Low / Off
-    P3DIR &= ~SMCLK;      // Direction = Input
+    // P3.4 - SMCLK configuration based on argument
+    if(smclk == USE_SMCLK) {
+        // Configure P3.4 for SMCLK output
+        P3SEL0 |= SMCLK;       // Set bit for primary peripheral function
+        P3SEL1 &= ~SMCLK;      // Clear bit for primary peripheral function
+        P3DIR |= SMCLK;        // Direction = output
+    } else {
+        // Configure P3.4 as GPIO
+        P3SEL0 &= ~SMCLK;      // Clear for GPIO operation
+        P3SEL1 &= ~SMCLK;      // Clear for GPIO operation
+        P3OUT &= ~SMCLK;       // Initial Value = Low / Off
+        P3DIR &= ~SMCLK;       // Direction = Input
+    }
 
-    P3SEL0 &= ~DAC_CNTL;   // CHECK_ BAT GPIO operation
-    P3SEL1 &= ~DAC_CNTL;   // CHECK BAT GPIO operation
+    P3SEL0 &= ~DAC_CNTL;   // DAC_CNTL GPIO operation
+    P3SEL1 &= ~DAC_CNTL;   // DAC_CNTL GPIO operation
     P3OUT &= ~DAC_CNTL;    // Initial Value = Low / Off
-    P3DIR &= ~DAC_CNTL;      // Direction = Input
+    P3DIR &= ~DAC_CNTL;    // Direction = Input
 
-    P3SEL0 &= ~IOT_LINK_CPU;   // CHECK_ BAT GPIO operation
-    P3SEL1 &= ~IOT_LINK_CPU;   // CHECK BAT GPIO operation
+    P3SEL0 &= ~IOT_LINK_CPU;   // IOT_LINK_CPU GPIO operation
+    P3SEL1 &= ~IOT_LINK_CPU;   // IOT_LINK_CPU GPIO operation
     P3OUT &= ~IOT_LINK_CPU;    // Initial Value = Low / Off
-    P3DIR &= ~IOT_LINK_CPU;      // Direction = Input
+    P3DIR &= ~IOT_LINK_CPU;    // Direction = Input
 
-    P3SEL0 &= ~IOT_EN_CPU;   // CHECK_ BAT GPIO operation
-    P3SEL1 &= ~IOT_EN_CPU;   // CHECK BAT GPIO operation
+    P3SEL0 &= ~IOT_EN_CPU;   // IOT_EN_CPU GPIO operation
+    P3SEL1 &= ~IOT_EN_CPU;   // IOT_EN_CPU GPIO operation
     P3OUT &= ~IOT_EN_CPU;    // Initial Value = Low / Off
-    P3DIR &= ~IOT_EN_CPU;      // Direction = Input
+    P3DIR &= ~IOT_EN_CPU;    // Direction = Input
 }
 
 //-----------------------------------------------------------
@@ -236,6 +245,11 @@ void Init_Port5(void){
 
 }
 //-----------------------------------------------------------
+//-----------------------------------------------------------
+// UPDATED Init_Port6 Function with PWM Configuration
+// Replace your existing Init_Port6() function with this
+//-----------------------------------------------------------
+
 void Init_Port6(void){
 
    //Configure Port 6
@@ -247,25 +261,29 @@ void Init_Port6(void){
   P6OUT |= LCD_BACKLITE;
   P6DIR |= LCD_BACKLITE;
 
-  P6SEL0 &= ~R_FORWARD;
-  P6SEL1 &= ~R_FORWARD;
-  P6OUT  &= ~R_FORWARD;
-  P6DIR  |= R_FORWARD;
+  // RIGHT FORWARD - P6.1 - Configure for Timer B3.2 PWM
+  P6SEL0 |= R_FORWARD;       // Set SEL0 for Timer function
+  P6SEL1 &= ~R_FORWARD;      // Clear SEL1 for Timer function
+  P6OUT  &= ~R_FORWARD;      // Initial output LOW
+  P6DIR  |= R_FORWARD;       // Direction = output
 
-  P6SEL0 &= ~R_REVERSE;
-  P6SEL1 &= ~R_REVERSE;
-  P6OUT  &= ~R_REVERSE;
-  P6DIR  |= R_REVERSE;
+  // LEFT FORWARD - P6.2 - Configure for Timer B3.3 PWM
+  P6SEL0 |= L_FORWARD;       // Set SEL0 for Timer function
+  P6SEL1 &= ~L_FORWARD;      // Clear SEL1 for Timer function
+  P6OUT  &= ~L_FORWARD;      // Initial output LOW
+  P6DIR  |= L_FORWARD;       // Direction = output
 
-  P6SEL0 &= ~L_FORWARD;
-  P6SEL1 &= ~L_FORWARD;
-  P6OUT  &= ~L_FORWARD;
-  P6DIR  |= L_FORWARD;
+  // RIGHT REVERSE - P6.3 - Configure for Timer B3.4 PWM
+  P6SEL0 |= R_REVERSE;       // Set SEL0 for Timer function
+  P6SEL1 &= ~R_REVERSE;      // Clear SEL1 for Timer function
+  P6OUT  &= ~R_REVERSE;      // Initial output LOW
+  P6DIR  |= R_REVERSE;       // Direction = output
 
-  P6SEL0 &= ~L_REVERSE;
-  P6SEL1 &= ~L_REVERSE;
-  P6OUT  &= ~L_REVERSE;
-  P6DIR  |= L_REVERSE;
+  // LEFT REVERSE - P6.4 - Configure for Timer B3.5 PWM
+  P6SEL0 |= L_REVERSE;       // Set SEL0 for Timer function
+  P6SEL1 &= ~L_REVERSE;      // Clear SEL1 for Timer function
+  P6OUT  &= ~L_REVERSE;      // Initial output LOW
+  P6DIR  |= L_REVERSE;       // Direction = output
 
   P6SEL0 &= ~P6_5;
   P6SEL1 &= ~P6_5;
