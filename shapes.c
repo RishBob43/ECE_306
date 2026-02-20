@@ -22,19 +22,19 @@ extern volatile unsigned char shape_iteration;
 extern volatile unsigned int shape_start_time;
 
 // Motor speed definitions for shapes
-#define CIRCLE_FAST_SPEED    7000
-#define CIRCLE_SLOW_SPEED    3500
-#define FIGURE8_FAST_SPEED   7000
-#define FIGURE8_SLOW_SPEED   3500
+#define CIRCLE_FAST_SPEED    8000
+#define CIRCLE_SLOW_SPEED    2000
+#define FIGURE8_FAST_SPEED   8000
+#define FIGURE8_SLOW_SPEED   2000
 #define TRIANGLE_SPEED       6000
 #define TURN_SPEED           4000
 
 // Shape timing definitions (in milliseconds)
-#define SAFETY_DELAY         2500    // 2.5 second safety delay
-#define CIRCLE_TIME          5000    // Time for one circle
-#define FIGURE8_LOOP_TIME    4500    // Time for one loop of figure-8
-#define TRIANGLE_STRAIGHT    2000    // Straight leg time
-#define TRIANGLE_TURN        600     // Turn time at vertices
+#define SAFETY_DELAY         1500    // 2.5 second safety delay
+#define CIRCLE_TIME          4250    // Time for one circle
+#define FIGURE8_LOOP_TIME    5000    // Time for one loop of figure-8
+#define TRIANGLE_STRAIGHT    1000    // Straight leg time
+#define TRIANGLE_TURN        1000     // Turn time at vertices
 
 //------------------------------------------------------------------------------
 // Motor Control Functions
