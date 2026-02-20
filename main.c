@@ -1,94 +1,74 @@
 //------------------------------------------------------------------------------
+// main.c  –  Main Routine / "While" Operating System
 //
-//  Description: This file contains the Main Routine - "While" Operating System
-//               with Shape Drawing Functionality
+// Shape Drawing with SMCLK / GPIO P3.4 toggle via switches
+//   SW1: cycle shape selection  AND  configure P3.4 as SMCLK output (500 kHz)
+//   SW2: start selected shape   AND  configure P3.4 as GPIO input
 //
-//  Jim Carlson
-//  Jan 2023
-//  Built with Code Composer Version: CCS12.4.0.00007_win64
+// See switches.c for full behaviour description.
 //------------------------------------------------------------------------------
 
-//------------------------------------------------------------------------------
-#include  "msp430.h"
-#include  <string.h>
-#include  "functions.h"
-#include  "LCD.h"
-#include  "ports.h"
+#include "msp430.h"
+#include <string.h>
+#include "functions.h"
+#include "LCD.h"
+#include "ports.h"
 #include "macros.h"
 
-// Function Prototypes
+// Prototypes for functions defined in this file
 void main(void);
-void Init_Conditions(void);
-void Display_Process(void);
-void Init_LEDs(void);
 
-  // Global Variables
+// Globals owned by this file
 volatile char slow_input_down;
+unsigned char display_mode;
+unsigned int  test_value;
+char          chosen_direction;
+char          change;
+unsigned int  wheel_move;
+char          forward;
+
+// Externals from globals.c
 extern char display_line[4][11];
 extern char *display[4];
-unsigned char display_mode;
 extern volatile unsigned char display_changed;
 extern volatile unsigned char update_display;
-extern volatile unsigned int update_display_count;
-extern volatile unsigned int Time_Sequence;
-extern volatile char one_time;
+extern volatile unsigned int  update_display_count;
+extern volatile unsigned int  Time_Sequence;
+extern volatile char          one_time;
 extern volatile unsigned char current_shape;
-extern unsigned char selected_shape;
-unsigned int test_value;
-char chosen_direction;
-char change;
+extern unsigned char          selected_shape;
 
-unsigned int wheel_move;
-char forward;
-
-
-
-//void main(void){
+//------------------------------------------------------------------------------
 void main(void){
-//    WDTCTL = WDTPW | WDTHOLD;   // stop watchdog timer
+    // Disable GPIO power-on high-impedance mode
+    PM5CTL0 &= ~LOCKLPM5;
 
-//------------------------------------------------------------------------------
-// Main Program
-// This is the main routine for the program. Execution of code starts here.
-// The operating system is Back Ground Fore Ground.
-//
-//------------------------------------------------------------------------------
-  PM5CTL0 &= ~LOCKLPM5;
-// Disable the GPIO power-on default high-impedance mode to activate
-// previously configured port settings
+    Init_Ports();          // Configure all GPIO / peripheral pins
+    Init_Clocks();         // MCLK = 8 MHz, SMCLK = 500 kHz (DIVS=/16)
+    Init_Conditions();     // Zero variables, enable interrupts
+    Init_Timers();         // Configure Timer_B peripherals
+    Init_LCD();            // Bring up SPI LCD
+    Init_Switches();       // Configure SW1 / SW2 interrupts
 
-  Init_Ports();                        // Initialize Ports
-  Init_Clocks();                       // Initialize Clock System
-  Init_Conditions();                   // Initialize Variables and Initial Conditions
-  Init_Timers();                       // Initialize Timers
-  Init_LCD();                          // Initialize LCD
-  Init_Switches();                     // Initialize Switches
-//P2OUT &= ~RESET_LCD;
-  // Place the contents of what you want on the display, in between the quotes
-  // Limited to 10 characters per line
-  strcpy(display_line[0], "SELECT:   ");
-  strcpy(display_line[1], "  IDLE    ");
-  strcpy(display_line[2], " SW1:Next ");
-  strcpy(display_line[3], " SW2:Start");
-  display_changed = TRUE;
-//  Display_Update(0,0,0,0);
+    // Initial display: shape-select menu, P3.4 starts as GPIO
+    strcpy(display_line[0], "SELECT:   ");
+    strcpy(display_line[1], "  IDLE    ");
+    strcpy(display_line[2], " SW1:Next ");
+    strcpy(display_line[3], "P3.4= GPIO");
+    display_changed = TRUE;
 
-  wheel_move = 0;
-  forward = TRUE;
+    wheel_move     = 0;
+    forward        = TRUE;
+    current_shape  = SHAPE_NONE;
+    selected_shape = SHAPE_NONE;
 
-  // Initialize shape selection
-  current_shape = SHAPE_NONE;
-  selected_shape = SHAPE_NONE;
-
-//------------------------------------------------------------------------------
-// Begining of the "While" Operating System
-//------------------------------------------------------------------------------
-  while(ALWAYS) {                      // Can the Operating system run
-    Switches_Process();                // Check for switch state change (must be first)
-    Shapes_Process();                  // Process active shape
-    Display_Process();                 // Update Display
-    P3OUT ^= TEST_PROBE;               // Change State of TEST_PROBE OFF
-  }
-//------------------------------------------------------------------------------
-
+    //--------------------------------------------------------------------------
+    // "While" Operating System
+    //--------------------------------------------------------------------------
+    while(ALWAYS){
+        Switches_Process();   // SW1 / SW2 (must be first)
+        //Shapes_Process();     // Active shape state machines
+        Display_Process();    // Refresh LCD if display_changed
+        P3OUT ^= TEST_PROBE;  // Toggle P3.0 test probe each loop pass
+    }
 }

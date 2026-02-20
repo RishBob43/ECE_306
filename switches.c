@@ -1,7 +1,17 @@
 //------------------------------------------------------------------------------
-// Switch Processing with Shape Selection
-// SW1: Cycle through shapes (Circle -> Figure-8 -> Triangle -> Idle)
-// SW2: Execute selected shape
+// switches.c  –  Switch Processing
+//
+// WHAT EACH SWITCH DOES:
+//
+//   SW1 (P4.1) – TOGGLES P3.4 between SMCLK output and GPIO input.
+//                Each press flips the mode.
+//                LCD line 0 always shows the current P3.4 state.
+//
+//   SW2 (P2.3) – CYCLES shape selection when no shape is running.
+//                Starts the selected shape when one is selected.
+//                (IDLE -> CIRCLE -> FIGURE-8 -> TRIANGLE -> IDLE -> ...)
+//
+// The two functions are completely independent of each other.
 //------------------------------------------------------------------------------
 
 #include "msp430.h"
@@ -11,171 +21,170 @@
 #include "macros.h"
 #include <string.h>
 
-// External variables
 extern char display_line[4][11];
 extern char *display[4];
 extern volatile unsigned char display_changed;
 extern volatile unsigned char current_shape;
-
-// Switch variables - defined in globals.c
 extern volatile unsigned char sw1_pressed;
 extern volatile unsigned char sw2_pressed;
 extern unsigned char selected_shape;
 
-// Debounce timing
-#define DEBOUNCE_TIME 200  // 200ms debounce
+// Track current P3.4 mode so SW1 can toggle it
+static char p3_4_mode = USE_GPIO;
 
 //------------------------------------------------------------------------------
-// Initialize Switches
+// Init_Switches
 //------------------------------------------------------------------------------
-void Init_Switches(void) {
-    // SW1 on P4.1
-    P4OUT |= SW1;           // Configure pullup resistor
-    P4DIR &= ~SW1;          // Direction = input
-    P4REN |= SW1;           // Enable pullup resistor
-    P4IES |= SW1;           // High to Low edge
-    P4IE |= SW1;            // Enable interrupt
-    P4IFG &= ~SW1;          // Clear interrupt flag
+void Init_Switches(void){
+    // SW1  P4.1 – active-low, pull-up, falling-edge interrupt
+    P4OUT |=  SW1;
+    P4DIR &= ~SW1;
+    P4REN |=  SW1;
+    P4IES |=  SW1;
+    P4IE  |=  SW1;
+    P4IFG &= ~SW1;
 
-    // SW2 on P2.3
-    P2OUT |= SW2;           // Configure pullup resistor
-    P2DIR &= ~SW2;          // Direction = input
-    P2REN |= SW2;           // Enable pullup resistor
-    P2IES |= SW2;           // High to Low edge
-    P2IE |= SW2;            // Enable interrupt
-    P2IFG &= ~SW2;          // Clear interrupt flag
+    // SW2  P2.3 – active-low, pull-up, falling-edge interrupt
+    P2OUT |=  SW2;
+    P2DIR &= ~SW2;
+    P2REN |=  SW2;
+    P2IES |=  SW2;
+    P2IE  |=  SW2;
+    P2IFG &= ~SW2;
 }
 
 //------------------------------------------------------------------------------
-// Switch Interrupt Service Routines
+// ISRs – flag only, all logic runs in the foreground
 //------------------------------------------------------------------------------
-#pragma vector=PORT4_VECTOR
-__interrupt void switch1_interrupt(void) {
-    if(P4IFG & SW1) {
-        // Debounce: Check if button is actually pressed (LOW)
-        if(!(P4IN & SW1)) {
-            sw1_pressed = 1;
-        }
-        P4IFG &= ~SW1;      // Clear interrupt flag
+#pragma vector = PORT4_VECTOR
+__interrupt void switch1_interrupt(void){
+    if(P4IFG & SW1){
+        if(!(P4IN & SW1)) sw1_pressed = 1;
+        P4IFG &= ~SW1;
     }
 }
 
-#pragma vector=PORT2_VECTOR
-__interrupt void switch2_interrupt(void) {
-    if(P2IFG & SW2) {
-        // Debounce: Check if button is actually pressed (LOW)
-        if(!(P2IN & SW2)) {
-            sw2_pressed = 1;
-        }
-        P2IFG &= ~SW2;      // Clear interrupt flag
+#pragma vector = PORT2_VECTOR
+__interrupt void switch2_interrupt(void){
+    if(P2IFG & SW2){
+        if(!(P2IN & SW2)) sw2_pressed = 1;
+        P2IFG &= ~SW2;
     }
 }
 
 //------------------------------------------------------------------------------
-// Update display with selected shape
+// Update the full display
+// Line 0: P3.4 pin mode  (set by SW1)
+// Line 1: selected shape  (set by SW2)
+// Line 2: SW1 hint
+// Line 3: SW2 hint
 //------------------------------------------------------------------------------
-void update_shape_display(void) {
-    strcpy(display_line[0], "SELECT:   ");
+static void update_display_all(void){
+    // Line 0 – current P3.4 mode
+    if(p3_4_mode == USE_SMCLK){
+        strcpy(display_line[0], "P3.4=SMCLK");
+    } else {
+        strcpy(display_line[0], "P3.4= GPIO");
+    }
 
-    switch(selected_shape) {
-        case SHAPE_NONE:
-            strcpy(display_line[1], "  IDLE    ");
-            strcpy(display_line[2], " SW1:Next ");
-            strcpy(display_line[3], " SW2:Start");
-            break;
+    // Line 1 – selected shape
+    switch(selected_shape){
+        case SHAPE_NONE:     strcpy(display_line[1], "  IDLE    "); break;
+        case SHAPE_CIRCLE:   strcpy(display_line[1], "  CIRCLE  "); break;
+        case SHAPE_FIGURE8:  strcpy(display_line[1], " FIGURE-8 "); break;
+        case SHAPE_TRIANGLE: strcpy(display_line[1], " TRIANGLE "); break;
+        default:             strcpy(display_line[1], "          "); break;
+    }
 
-        case SHAPE_CIRCLE:
-            strcpy(display_line[1], "  CIRCLE  ");
-            strcpy(display_line[2], " SW1:Next ");
-            strcpy(display_line[3], " SW2:Start");
-            break;
+    // Line 2 – SW1 hint
+    strcpy(display_line[2], "SW1:CLK   ");
 
-        case SHAPE_FIGURE8:
-            strcpy(display_line[1], " FIGURE-8 ");
-            strcpy(display_line[2], " SW1:Next ");
-            strcpy(display_line[3], " SW2:Start");
-            break;
-
-        case SHAPE_TRIANGLE:
-            strcpy(display_line[1], " TRIANGLE ");
-            strcpy(display_line[2], " SW1:Next ");
-            strcpy(display_line[3], " SW2:Start");
-            break;
+    // Line 3 – SW2 hint
+    if(current_shape == SHAPE_NONE){
+        strcpy(display_line[3], "SW2:Select");
+    } else {
+        strcpy(display_line[3], " RUNNING  ");
     }
 
     display_changed = TRUE;
 }
 
+// Expose for use by main.c initial display setup
+void update_shape_display(void){ update_display_all(); }
+
 //------------------------------------------------------------------------------
-// Process SW1 - Select Shape
+// Switch 1 Process – TOGGLE P3.4 between SMCLK output and GPIO input
+//
+// Each press of SW1 flips the mode:
+//   GPIO  -> SMCLK : Init_Port3(USE_SMCLK)  SEL1=0 SEL0=1 DIR=output
+//   SMCLK -> GPIO  : Init_Port3(USE_GPIO)   SEL1=0 SEL0=0 DIR=input
 //------------------------------------------------------------------------------
-void Switch1_Process(void) {
-    if(sw1_pressed) {
+void Switch1_Process(void){
+    if(sw1_pressed){
         sw1_pressed = 0;
 
-        // Only allow shape selection when no shape is running
-        if(current_shape == SHAPE_NONE) {
-            // Cycle through shapes
-            selected_shape++;
-            if(selected_shape > SHAPE_TRIANGLE) {
-                selected_shape = SHAPE_NONE;
-            }
-
-            update_shape_display();
+        if(p3_4_mode == USE_GPIO){
+            Init_Port3(USE_SMCLK);   // Route 500 kHz SMCLK to P3.4
+            p3_4_mode = USE_SMCLK;
+        } else {
+            Init_Port3(USE_GPIO);    // Return P3.4 to plain GPIO input
+            p3_4_mode = USE_GPIO;
         }
 
-        // Clear flag and re-enable interrupt immediately
+        update_display_all();
+
         P4IFG &= ~SW1;
-        P4IE |= SW1;
+        P4IE  |=  SW1;
     }
 }
 
 //------------------------------------------------------------------------------
-// Process SW2 - Execute Shape
+// Switch 2 Process – CYCLE shape selection / START shape
+//
+// When no shape is running:
+//   First press  – advance selection (IDLE->CIRCLE->FIGURE8->TRIANGLE->IDLE)
+//   If a shape other than IDLE is already selected, start it instead
+//
+// Simpler rule actually used here:
+//   If current_shape == NONE and selected_shape == NONE  -> advance selection
+//   If current_shape == NONE and selected_shape != NONE  -> start shape
+//   If current_shape != NONE                             -> ignore (shape running)
 //------------------------------------------------------------------------------
-void Switch2_Process(void) {
-    if(sw2_pressed) {
+void Switch2_Process(void){
+    if(sw2_pressed){
         sw2_pressed = 0;
 
-        // Only start shape if one is selected and none is running
-        if(selected_shape != SHAPE_NONE && current_shape == SHAPE_NONE) {
-            start_shape(selected_shape);
+        if(current_shape == SHAPE_NONE){
+            if(selected_shape == SHAPE_NONE){
+                // Nothing selected yet – advance to first shape
+                selected_shape = SHAPE_CIRCLE;
+            } else {
+                // A shape is selected – start it, then reset selection
+                start_shape(selected_shape);
+                selected_shape = SHAPE_NONE;
+            }
         }
+        // If a shape is already running, SW2 does nothing
 
-        // Clear flag and re-enable interrupt immediately
+        update_display_all();
+
         P2IFG &= ~SW2;
-        P2IE |= SW2;
+        P2IE  |=  SW2;
     }
 }
 
 //------------------------------------------------------------------------------
-// Main Switches Process - Called from main loop
+// Switches_Process – called every pass of the main while loop
 //------------------------------------------------------------------------------
-void Switches_Process(void) {
+void Switches_Process(void){
     Switch1_Process();
     Switch2_Process();
 }
 
 //------------------------------------------------------------------------------
-// Enable switch interrupts
+// Enable / Disable helpers
 //------------------------------------------------------------------------------
-void enable_switch_SW1(void) {
-    P4IFG &= ~SW1;
-    P4IE |= SW1;
-}
-
-void enable_switch_SW2(void) {
-    P2IFG &= ~SW2;
-    P2IE |= SW2;
-}
-
-//------------------------------------------------------------------------------
-// Disable switch interrupts
-//------------------------------------------------------------------------------
-void disable_switch_SW1(void) {
-    P4IE &= ~SW1;
-}
-
-void disable_switch_SW2(void) {
-    P2IE &= ~SW2;
-}
+void enable_switch_SW1(void){ P4IFG &= ~SW1; P4IE |= SW1; }
+void enable_switch_SW2(void){ P2IFG &= ~SW2; P2IE |= SW2; }
+void disable_switch_SW1(void){ P4IE &= ~SW1; }
+void disable_switch_SW2(void){ P2IE &= ~SW2; }
