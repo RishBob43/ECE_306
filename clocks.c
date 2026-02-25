@@ -19,17 +19,10 @@ void Software_Trim(void);
 
 void Init_Clocks(void){
 // -----------------------------------------------------------------------------
-// Clock Configurtaions
-// This is the clock initialization for the program.
-// Initial clock configuration, runs immediately after port configuration.
-// Disables 1ms watchdog timer,
-// Configure MCLK for 8MHz and XT1 sourcing ACLK and FLLREF.
-//
+// Clock Configurations
 // Description: Configure ACLK = 32768Hz,
 //                        MCLK = DCO + XT1CLK REF = 8MHz,
-//                        SMCLK = MCLK/2 = 4MHz.
-// Toggle LED to indicate that the program is running.
-//
+//                        SMCLK = MCLK/16 = 500kHz.
 // -----------------------------------------------------------------------------
   WDTCTL = WDTPW | WDTHOLD;  // Disable watchdog
 
@@ -50,18 +43,16 @@ void Init_Clocks(void){
   CSCTL3 |= SELREF__XT1CLK;  // Set XT1CLK as FLL reference source
   __delay_cycles(3);
   __bic_SR_register(SCG0);   // enable FLL
-  Software_Trim();           // Software Trim to get the best DCOFTRIM value
+  Software_Trim();            // Software Trim to get the best DCOFTRIM value
 
   CSCTL4 = SELA__XT1CLK;     // Set ACLK = XT1CLK = 32768Hz
   CSCTL4 |= SELMS__DCOCLKDIV;// DCOCLK = MCLK and SMCLK source
 
-//  CSCTL5 |= DIVM__4;         // MCLK = DCOCLK / 4  = 2MHZ,
-//  CSCTL5 |= DIVS__4;         // SMCLK = MCLK / 4 = 500KHz
-  CSCTL5 |= DIVM__1;        // MCLK = DCOCLK = 8MHZ,
-  CSCTL5 |= DIVS__1;        // SMCLK = MCLK = 8MHz
+  CSCTL5 |= DIVM__1;         // MCLK  = DCOCLK / 1  = 8MHz
+  CSCTL5 |= DIVS__1;        // SMCLK = MCLK  / 16  = 500kHz
 
-  PM5CTL0 &= ~LOCKLPM5;      // Disable the GPIO power-on default high-impedance mode
-                             // to activate previously configured port settings
+  PM5CTL0 &= ~LOCKLPM5;      // Disable the GPIO power-on default high-impedance
+                              // mode to activate previously configured port settings
 }
 
 void Software_Trim(void){
@@ -121,4 +112,3 @@ void Software_Trim(void){
   CSCTL1 = csCtl1Copy;                      // Reload locked DCOFTRIM
   while(CSCTL7 & (FLLUNLOCK0 | FLLUNLOCK1));// Poll until FLL is locked
 }
-

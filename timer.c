@@ -3,12 +3,9 @@
 // Timer B0: 1ms tick  |  Timer B3: PWM motor control
 //
 // Clock chain for Timer B0:
-//   SMCLK         = 500 kHz  (8MHz DCO / DIVM__2 / DIVS__8, set in clocks.c)
-//   ID__8         = /8       -> timer clock = 62,500 Hz
-//   TB0_1MS_COUNT = 62       -> 62,500 / 62 ~= 1,008 Hz (~0.99ms per tick)
-//
-// Note: 62,500/1000 = 62.5 (non-integer). CCR0=62 gives ~0.8% timing error,
-//       acceptable for display refresh and shape timing purposes.
+//   SMCLK         = 500 kHz  (8MHz DCO / DIVS__16, set in clocks.c)
+//   ID__4         = /4       -> timer clock = 125,000 Hz
+//   TB0_1MS_COUNT = 125      -> 125,000 / 125 = 1,000 Hz (exactly 1ms per tick)
 //------------------------------------------------------------------------------
 #include "msp430.h"
 #include "functions.h"
@@ -29,15 +26,14 @@ extern volatile char          one_time;
 volatile unsigned int msec_count = 0;
 
 //------------------------------------------------------------------------------
-// Init_Timer_B0 - ~1ms tick from 500kHz SMCLK
-// SMCLK(500kHz) / ID__8 = 62.5kHz timer clock
-// 62.5kHz / CCR0(62) ~= 1008 Hz ~= 1ms tick
+// Init_Timer_B0 - exactly 1ms tick from 500kHz SMCLK
+// SMCLK(500kHz) / ID__4 = 125kHz timer clock
+// 125kHz / CCR0(125) = 1000 Hz = exactly 1ms tick
 //------------------------------------------------------------------------------
 void Init_Timer_B0(void) {
     TB0CTL   = TBSSEL__SMCLK;   // Source = SMCLK (500 kHz)
     TB0CTL  |= TBCLR;           // Clear timer and dividers
-    TB0CTL  |= ID__8;           // Prescale /8 -> 125,000 Hz timer clock
-    // TBIDEX NOT set - /1 (default) keeps timer clock at 125kHz
+    TB0CTL  |= ID__4;           // Prescale /4 -> 125,000 Hz timer clock
     TB0CCR0  = TB0_1MS_COUNT;   // 125 counts = exactly 1ms
     TB0CCTL0 = CCIE;            // Enable CCR0 compare interrupt
     TB0CTL  |= MC__UP;          // Start timer in Up mode
@@ -69,10 +65,10 @@ __interrupt void Timer0_B0_ISR(void) {
 
 //------------------------------------------------------------------------------
 // Init_Timer_B3 - PWM for motor control
-// Uses SMCLK (1 MHz), period = WHEEL_PERIOD counts
+// Uses SMCLK (500 kHz), period = WHEEL_PERIOD counts
 //------------------------------------------------------------------------------
 void Init_Timer_B3(void) {
-    TB3CTL   = TBSSEL__SMCLK;           // Source = SMCLK
+    TB3CTL   = TBSSEL__SMCLK;           // Source = SMCLK (500 kHz)
     TB3CTL  |= TBCLR;                   // Clear timer
     TB3CTL  |= MC__UP;                  // Up mode
     TB3CCR0  = WHEEL_PERIOD;            // PWM period (defined in ports.h)
@@ -101,8 +97,7 @@ void delay_ms(unsigned int ms) {
 void five_msec_sleep(unsigned int mult) { delay_ms(mult * 5); }
 
 //------------------------------------------------------------------------------
-// usleep - busy-wait for 'usec' microseconds
-// Uses __delay_cycles(CYCLES_PER_USEC) per iteration (MCLK = 8MHz -> 8 cycles)
+// usleep - busy-wait for 'usec' microseconds (MCLK = 8MHz)
 //------------------------------------------------------------------------------
 void usleep(unsigned int usec) {
     volatile unsigned int i;
@@ -113,18 +108,3 @@ void usleep(unsigned int usec) {
 // usleep10 - busy-wait for usec * 10 microseconds
 //------------------------------------------------------------------------------
 void usleep10(unsigned int usec) { usleep(usec * TEN_USEC); }
-
-//------------------------------------------------------------------------------
-// Shape timer functions - use msec_count as a free-running ms counter
-//------------------------------------------------------------------------------
-void start_shape_timer(void) {
-    // Timer B0 is always running; shape timing reads msec_count directly
-}
-
-unsigned int get_shape_time(void) {
-    return msec_count;
-}
-
-void stop_shape_timer(void) {
-    // Nothing to stop - Timer B0 keeps running for display and Time_Sequence
-}

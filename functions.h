@@ -61,14 +61,11 @@ void lcd_4line(void);
 void lcd_out(char *s, char line, char position);
 void lcd_rotate(char view);
 
-// Menu
-void Menu_Process(void);
-
 // Ports
 void Init_Ports(void);
 void Init_Port1(void);
 void Init_Port2(void);
-void Init_Port3(char smclk);   // *** Updated: accepts USE_GPIO or USE_SMCLK ***
+void Init_Port3(char smclk);
 void Init_Port4(void);
 void Init_Port5(void);
 void Init_Port6(void);
@@ -97,7 +94,6 @@ void Switch1_Process(void);
 void Switch2_Process(void);
 void menu_act(void);
 void menu_select(void);
-void update_shape_display(void);
 
 // Timers
 void Init_Timers(void);
@@ -111,21 +107,5 @@ void five_msec_sleep(unsigned int msec);
 void measure_delay(void);
 void out_control_words(void);
 void delay_ms(unsigned int ms);
-void start_shape_timer(void);
-unsigned int get_shape_time(void);
-void stop_shape_timer(void);
-
-// Shapes
-void Shapes_Process(void);
-void Circle_StateMachine(void);
-void Figure8_StateMachine(void);
-void Triangle_StateMachine(void);
-void start_shape(unsigned char shape);
-
-// Motor Control
-void stop_motors(void);
-void move_forward(unsigned int left_speed, unsigned int right_speed);
-void turn_right_pivot(unsigned int speed);
-void turn_left_pivot(unsigned int speed);
 
 #endif /* FUNCTIONS_H_ */

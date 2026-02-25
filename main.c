@@ -1,11 +1,8 @@
 //------------------------------------------------------------------------------
 // main.c  –  Main Routine / "While" Operating System
 //
-// Shape Drawing with SMCLK / GPIO P3.4 toggle via switches
-//   SW1: cycle shape selection  AND  configure P3.4 as SMCLK output (500 kHz)
-//   SW2: start selected shape   AND  configure P3.4 as GPIO input
-//
-// See switches.c for full behaviour description.
+// SW1: toggle P3.4 between SMCLK output (500 kHz) and GPIO input
+// SW2: (available for future use)
 //------------------------------------------------------------------------------
 
 #include "msp430.h"
@@ -15,17 +12,7 @@
 #include "ports.h"
 #include "macros.h"
 
-// Prototypes for functions defined in this file
 void main(void);
-
-// Globals owned by this file
-volatile char slow_input_down;
-unsigned char display_mode;
-unsigned int  test_value;
-char          chosen_direction;
-char          change;
-unsigned int  wheel_move;
-char          forward;
 
 // Externals from globals.c
 extern char display_line[4][11];
@@ -35,8 +22,6 @@ extern volatile unsigned char update_display;
 extern volatile unsigned int  update_display_count;
 extern volatile unsigned int  Time_Sequence;
 extern volatile char          one_time;
-extern volatile unsigned char current_shape;
-extern unsigned char          selected_shape;
 
 //------------------------------------------------------------------------------
 void main(void){
@@ -50,25 +35,20 @@ void main(void){
     Init_LCD();            // Bring up SPI LCD
     Init_Switches();       // Configure SW1 / SW2 interrupts
 
-    // Initial display: shape-select menu, P3.4 starts as GPIO
-    strcpy(display_line[0], "SELECT:   ");
-    strcpy(display_line[1], "  IDLE    ");
-    strcpy(display_line[2], " SW1:Next ");
-    strcpy(display_line[3], "P3.4= GPIO");
+    // Initial display: show P3.4 starts as GPIO
+    strcpy(display_line[0], "P3.4= GPIO");
+    strcpy(display_line[1], "          ");
+    strcpy(display_line[2], "SW1:Toggle");
+    strcpy(display_line[3], " CLK/GPIO ");
     display_changed = TRUE;
-
-    wheel_move     = 0;
-    forward        = TRUE;
-    current_shape  = SHAPE_NONE;
-    selected_shape = SHAPE_NONE;
 
     //--------------------------------------------------------------------------
     // "While" Operating System
     //--------------------------------------------------------------------------
     while(ALWAYS){
-        Switches_Process();   // SW1 / SW2 (must be first)
-        //Shapes_Process();     // Active shape state machines
+        Switches_Process();   // SW1 / SW2
         Display_Process();    // Refresh LCD if display_changed
+        Carlson_StateMachine();
         P3OUT ^= TEST_PROBE;  // Toggle P3.0 test probe each loop pass
     }
 }

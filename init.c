@@ -14,13 +14,8 @@ extern volatile unsigned char update_display;
 extern volatile unsigned int  update_display_count;
 extern volatile unsigned int  Time_Sequence;
 extern volatile char          one_time;
-extern volatile unsigned char current_shape;
-extern volatile unsigned char shape_state;
-extern volatile unsigned char shape_iteration;
-extern volatile unsigned int  shape_start_time;
 extern volatile unsigned char sw1_pressed;
 extern volatile unsigned char sw2_pressed;
-extern unsigned char          selected_shape;
 
 void Init_Conditions(void){
     int i;
@@ -45,13 +40,6 @@ void Init_Conditions(void){
     display[3] = &display_line[3][0];
 
     update_display = 0;
-
-    // Shape variables
-    current_shape    = SHAPE_NONE;
-    shape_state      = 0;
-    shape_iteration  = 0;
-    shape_start_time = 0;
-    selected_shape   = SHAPE_NONE;
 
     // Switch flags
     sw1_pressed = 0;

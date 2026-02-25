@@ -1,17 +1,11 @@
 //------------------------------------------------------------------------------
 // switches.c  –  Switch Processing
 //
-// WHAT EACH SWITCH DOES:
+// SW1 (P4.1) – Toggles P3.4 between SMCLK output (500 kHz) and GPIO input.
+//              Each press flips the mode.
+//              LCD line 0 always shows the current P3.4 state.
 //
-//   SW1 (P4.1) – TOGGLES P3.4 between SMCLK output and GPIO input.
-//                Each press flips the mode.
-//                LCD line 0 always shows the current P3.4 state.
-//
-//   SW2 (P2.3) – CYCLES shape selection when no shape is running.
-//                Starts the selected shape when one is selected.
-//                (IDLE -> CIRCLE -> FIGURE-8 -> TRIANGLE -> IDLE -> ...)
-//
-// The two functions are completely independent of each other.
+// SW2 (P2.3) – Reserved / unused.
 //------------------------------------------------------------------------------
 
 #include "msp430.h"
@@ -24,10 +18,8 @@
 extern char display_line[4][11];
 extern char *display[4];
 extern volatile unsigned char display_changed;
-extern volatile unsigned char current_shape;
 extern volatile unsigned char sw1_pressed;
 extern volatile unsigned char sw2_pressed;
-extern unsigned char selected_shape;
 
 // Track current P3.4 mode so SW1 can toggle it
 static char p3_4_mode = USE_GPIO;
@@ -73,51 +65,23 @@ __interrupt void switch2_interrupt(void){
 }
 
 //------------------------------------------------------------------------------
-// Update the full display
-// Line 0: P3.4 pin mode  (set by SW1)
-// Line 1: selected shape  (set by SW2)
-// Line 2: SW1 hint
-// Line 3: SW2 hint
+// Update display to reflect current P3.4 mode
 //------------------------------------------------------------------------------
 static void update_display_all(void){
-    // Line 0 – current P3.4 mode
     if(p3_4_mode == USE_SMCLK){
         strcpy(display_line[0], "P3.4=SMCLK");
+        strcpy(display_line[1], " 500  kHz ");
     } else {
         strcpy(display_line[0], "P3.4= GPIO");
+        strcpy(display_line[1], "          ");
     }
-
-    // Line 1 – selected shape
-    switch(selected_shape){
-        case SHAPE_NONE:     strcpy(display_line[1], "  IDLE    "); break;
-        case SHAPE_CIRCLE:   strcpy(display_line[1], "  CIRCLE  "); break;
-        case SHAPE_FIGURE8:  strcpy(display_line[1], " FIGURE-8 "); break;
-        case SHAPE_TRIANGLE: strcpy(display_line[1], " TRIANGLE "); break;
-        default:             strcpy(display_line[1], "          "); break;
-    }
-
-    // Line 2 – SW1 hint
-    strcpy(display_line[2], "SW1:CLK   ");
-
-    // Line 3 – SW2 hint
-    if(current_shape == SHAPE_NONE){
-        strcpy(display_line[3], "SW2:Select");
-    } else {
-        strcpy(display_line[3], " RUNNING  ");
-    }
-
+    strcpy(display_line[2], "SW1:Toggle");
+    strcpy(display_line[3], " CLK/GPIO ");
     display_changed = TRUE;
 }
 
-// Expose for use by main.c initial display setup
-void update_shape_display(void){ update_display_all(); }
-
 //------------------------------------------------------------------------------
-// Switch 1 Process – TOGGLE P3.4 between SMCLK output and GPIO input
-//
-// Each press of SW1 flips the mode:
-//   GPIO  -> SMCLK : Init_Port3(USE_SMCLK)  SEL1=0 SEL0=1 DIR=output
-//   SMCLK -> GPIO  : Init_Port3(USE_GPIO)   SEL1=0 SEL0=0 DIR=input
+// Switch 1 Process – Toggle P3.4 between SMCLK output and GPIO input
 //------------------------------------------------------------------------------
 void Switch1_Process(void){
     if(sw1_pressed){
@@ -139,35 +103,11 @@ void Switch1_Process(void){
 }
 
 //------------------------------------------------------------------------------
-// Switch 2 Process – CYCLE shape selection / START shape
-//
-// When no shape is running:
-//   First press  – advance selection (IDLE->CIRCLE->FIGURE8->TRIANGLE->IDLE)
-//   If a shape other than IDLE is already selected, start it instead
-//
-// Simpler rule actually used here:
-//   If current_shape == NONE and selected_shape == NONE  -> advance selection
-//   If current_shape == NONE and selected_shape != NONE  -> start shape
-//   If current_shape != NONE                             -> ignore (shape running)
+// Switch 2 Process – Reserved, clears flag only
 //------------------------------------------------------------------------------
 void Switch2_Process(void){
     if(sw2_pressed){
         sw2_pressed = 0;
-
-        if(current_shape == SHAPE_NONE){
-            if(selected_shape == SHAPE_NONE){
-                // Nothing selected yet – advance to first shape
-                selected_shape = SHAPE_CIRCLE;
-            } else {
-                // A shape is selected – start it, then reset selection
-                start_shape(selected_shape);
-                selected_shape = SHAPE_NONE;
-            }
-        }
-        // If a shape is already running, SW2 does nothing
-
-        update_display_all();
-
         P2IFG &= ~SW2;
         P2IE  |=  SW2;
     }
