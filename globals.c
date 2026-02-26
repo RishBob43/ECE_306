@@ -1,16 +1,15 @@
-//------------------------------------------------------------------------------
-// globals.c  –  Global variable definitions
-// All global variables used across multiple source files are defined here.
-//------------------------------------------------------------------------------
+
 
 #include "macros.h"
 
-// Display
+// Display buffers
 char display_line[4][11];
 char *display[4];
 
+// Timer / state machine
+volatile unsigned int  Time_Sequence = 0;
+volatile char          one_time      = 0;
 
-
-// Switch state flags (set in ISR, cleared in Switch*_Process)
-volatile unsigned char sw1_pressed         = 0;
-volatile unsigned char sw2_pressed         = 0;
+// Switch state flags
+volatile unsigned char sw1_pressed   = 0;
+volatile unsigned char sw2_pressed   = 0;
