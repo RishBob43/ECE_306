@@ -18,12 +18,7 @@ void Init_Clocks(void);
 void Software_Trim(void);
 
 void Init_Clocks(void){
-// -----------------------------------------------------------------------------
-// Clock Configurations
-// Description: Configure ACLK = 32768Hz,
-//                        MCLK = DCO + XT1CLK REF = 8MHz,
-//                        SMCLK = MCLK/16 = 500kHz.
-// -----------------------------------------------------------------------------
+
   WDTCTL = WDTPW | WDTHOLD;  // Disable watchdog
 
   do{
