@@ -44,71 +44,69 @@ void Init_Ports(void){
     Init_Port6();
 }
 
-/*------------------------------------------------------------------------------
+
+/*==============================================================================
  * Init_Port1
- * Description: Configures all Port 1 pins.
- *   P1.0  RED_LED   - GPIO output, init low
- *   P1.1  V_A1_SEEED - GPIO input
- *   P1.2  V_DETECT_L - GPIO input
- *   P1.3  V_DETECT_R - GPIO input
- *   P1.4  V_A4_SEEED - GPIO input
- *   P1.5  V_THUMB    - GPIO input
- *   P1.6  UCA0RXD    - GPIO input (UART configured elsewhere)
- *   P1.7  UCA0TXD    - GPIO input (UART configured elsewhere)
- * Globals used:  none
- * Locals used:   none
- *------------------------------------------------------------------------------*/
+ *
+ * P1.0  RED_LED      – GPIO output, init LOW
+ * P1.1  V_A1_SEEED   – analog input  (SELC disables digital buffer)
+ * P1.2  V_DETECT_L   – analog input  (SELC) – ADC channel A2
+ * P1.3  V_DETECT_R   – analog input  (SELC) – ADC channel A3
+ * P1.4  V_A4_SEEED   – analog input  (SELC) – ADC channel A4
+ * P1.5  V_THUMB      – analog input  (SELC) – ADC channel A5
+ * P1.6  UCA0RXD      – UART primary function (SEL0=1, SEL1=0)
+ * P1.7  UCA0TXD      – UART primary function (SEL0=1, SEL1=0)
+ *==============================================================================*/
 void Init_Port1(void){
+
     P1OUT = RESET_STATE;
     P1DIR = RESET_STATE;
 
-    /* P1.0  RED_LED – output, init low */
+    /*--------------------------------------------------------------------------
+     * P1.0  RED_LED – digital GPIO output, initial state LOW
+     *------------------------------------------------------------------------*/
     P1SEL0 &= ~RED_LED;
     P1SEL1 &= ~RED_LED;
-    P1OUT  &= ~RED_LED;
+    P1OUT  &= ~RED_LED;           /* Start LED off                             */
     P1DIR  |=  RED_LED;
 
-    /* P1.1  V_A1_SEEED – input */
-    P1SEL0 &= ~V_A1_SEEED;
-    P1SEL1 &= ~V_A1_SEEED;
-    P1OUT  &= ~V_A1_SEEED;
-    P1DIR  &= ~V_A1_SEEED;
+    /*--------------------------------------------------------------------------
+     * P1.1  V_A1_SEEED – analog input
+     *   P1SELC sets both SEL0 and SEL1 high, disabling the digital buffer.
+     *------------------------------------------------------------------------*/
+    P1SELC |= V_A1_SEEED;
 
-    /* P1.2  V_DETECT_L – input */
-    P1SEL0 &= ~V_DETECT_L;
-    P1SEL1 &= ~V_DETECT_L;
-    P1OUT  &= ~V_DETECT_L;
-    P1DIR  &= ~V_DETECT_L;
+    /*--------------------------------------------------------------------------
+     * P1.2  V_DETECT_L – analog input (ADC A2, left IR detector)
+     *------------------------------------------------------------------------*/
+    P1SELC |= V_DETECT_L;
 
-    /* P1.3  V_DETECT_R – input */
-    P1SEL0 &= ~V_DETECT_R;
-    P1SEL1 &= ~V_DETECT_R;
-    P1OUT  &= ~V_DETECT_R;
-    P1DIR  &= ~V_DETECT_R;
+    /*--------------------------------------------------------------------------
+     * P1.3  V_DETECT_R – analog input (ADC A3, right IR detector)
+     *------------------------------------------------------------------------*/
+    P1SELC |= V_DETECT_R;
 
-    /* P1.4  V_A4_SEEED – input */
-    P1SEL0 &= ~V_A4_SEEED;
-    P1SEL1 &= ~V_A4_SEEED;
-    P1OUT  &= ~V_A4_SEEED;
-    P1DIR  &= ~V_A4_SEEED;
+    /*--------------------------------------------------------------------------
+     * P1.4  V_A4_SEEED – analog input
+     *------------------------------------------------------------------------*/
+    P1SELC |= V_A4_SEEED;
 
-    /* P1.5  V_THUMB – input */
-    P1SEL0 &= ~V_THUMB;
-    P1SEL1 &= ~V_THUMB;
-    P1OUT  &= ~V_THUMB;
-    P1DIR  &= ~V_THUMB;
+    /*--------------------------------------------------------------------------
+     * P1.5  V_THUMB – analog input (ADC A5, thumbwheel)
+     *------------------------------------------------------------------------*/
+    P1SELC |= V_THUMB;
 
-    /* P1.6  UCA0RXD – input */
-    P1SEL0 &= ~UCA0RXD;
+    /*--------------------------------------------------------------------------
+     * P1.6  UCA0RXD – UART primary function (SEL0=1, SEL1=0)
+     *------------------------------------------------------------------------*/
+    P1SEL0 |=  UCA0RXD;
     P1SEL1 &= ~UCA0RXD;
-    P1OUT  &= ~UCA0RXD;
-    P1DIR  &= ~UCA0RXD;
 
-    /* P1.7  UCA0TXD – input */
-    P1SEL0 &= ~UCA0TXD;
+    /*--------------------------------------------------------------------------
+     * P1.7  UCA0TXD – UART primary function (SEL0=1, SEL1=0)
+     *------------------------------------------------------------------------*/
+    P1SEL0 |=  UCA0TXD;
     P1SEL1 &= ~UCA0TXD;
-    P1OUT  &= ~UCA0TXD;
-    P1DIR  &= ~UCA0TXD;
 }
 
 /*------------------------------------------------------------------------------
@@ -331,31 +329,39 @@ void Init_Port4(void){
     P4SEL1 &= ~UCB1SOMI;
 }
 
-/*------------------------------------------------------------------------------
- * Init_Port5
- * Description: Configures Port 5 pins as GPIO inputs.
- *   P5.0  V_BAT        - ADC input (GPIO mode)
- *   P5.1  V_5          - ADC input
- *   P5.2  V_DAC        - ADC input
- *   P5.3  V_3_3        - ADC input
- *   P5.4  IOT_BOOT_CPU - GPIO input
- * Globals used:  none
- * Locals used:   none
- *------------------------------------------------------------------------------*/
+/*==============================================================================
+ * Init_Port5  (Project 6 version)
+ *
+ * P5.0  V_BAT        – analog input  (SELC) – ADC A8
+ * P5.1  V_5          – analog input  (SELC) – ADC A9
+ * P5.2  V_DAC        – analog input  (SELC) – ADC A10
+ * P5.3  V_3_3        – analog input  (SELC) – ADC A11
+ * P5.4  IOT_BOOT_CPU – GPIO output, init HIGH (inactive)
+ *==============================================================================*/
 void Init_Port5(void){
+
     P5OUT = RESET_STATE;
     P5DIR = RESET_STATE;
 
-    P5SEL0 &= ~V_BAT;     P5SEL1 &= ~V_BAT;
-    P5SEL0 &= ~V_5;       P5SEL1 &= ~V_5;
-    P5SEL0 &= ~V_DAC;     P5SEL1 &= ~V_DAC;
-    P5SEL0 &= ~V_3_3;     P5SEL1 &= ~V_3_3;
+    /*--------------------------------------------------------------------------
+     * Analog ADC input pins – disable digital buffers with SELC
+     *------------------------------------------------------------------------*/
+    P5SELC |= V_BAT;
+    P5SELC |= V_5;
+    P5SELC |= V_DAC;
+    P5SELC |= V_3_3;
 
+    /*--------------------------------------------------------------------------
+     * P5.4  IOT_BOOT_CPU – GPIO output, init HIGH (de-assert boot signal)
+     *------------------------------------------------------------------------*/
     P5SEL0 &= ~IOT_BOOT_CPU;
     P5SEL1 &= ~IOT_BOOT_CPU;
-    P5OUT  &= ~IOT_BOOT_CPU;
-    P5DIR  &= ~IOT_BOOT_CPU;
+    P5OUT  |=  IOT_BOOT_CPU;      /* High = inactive                           */
+    P5DIR  |=  IOT_BOOT_CPU;
 }
+
+
+
 
 /*------------------------------------------------------------------------------
  * Init_Port6

@@ -1,32 +1,46 @@
-//******************************************************************************
-// functions.h  –  Function prototypes
-//******************************************************************************
+/*------------------------------------------------------------------------------
+ * File:        functions.h  (Project 6)
+ * Target:      MSP430FR2355
+ *
+ * Description: All function prototypes for the project.
+ *              Project 6 additions are marked with // [P6]
+ *------------------------------------------------------------------------------*/
 
 #ifndef FUNCTIONS_H_
 #define FUNCTIONS_H_
 
-// Main
+/* ---- Main ----------------------------------------------------------------- */
 void main(void);
 
-// Initialization
+/* ---- Initialization ------------------------------------------------------- */
 void Init_Conditions(void);
 
-// Interrupts
+/* ---- Interrupts ----------------------------------------------------------- */
 void enable_interrupts(void);
 __interrupt void Timer0_B0_ISR(void);
+__interrupt void Timer0_B1_ISR(void);       // [P6] CCR1/CCR2 debounce
 __interrupt void switch1_interrupt(void);
 __interrupt void switch2_interrupt(void);
+__interrupt void ADC_ISR(void);             // [P6] ADC conversion complete
 
-// Clocks
+/* ---- Clocks --------------------------------------------------------------- */
 void Init_Clocks(void);
 
-// LED
+/* ---- LED / IR emitter ----------------------------------------------------- */
 void Init_LEDs(void);
-void IR_LED_control(char selection);
-void Backlite_control(char selection);
+void IR_LED_control(char selection);        // [P6] IR emitter on/off
+void Backlite_control(char selection);      // [P6] LCD backlight on/off
 void Carlson_StateMachine(void);
 
-// LCD
+/* ---- Line detection ------------------------------------------------------- */
+unsigned char Is_Black_Left(void);          // [P6]
+unsigned char Is_Black_Right(void);         // [P6]
+unsigned char Get_Line_State(void);         // [P6]
+
+/* ---- ADC ------------------------------------------------------------------ */
+void Init_ADC(void);                        // [P6]
+
+/* ---- LCD ------------------------------------------------------------------ */
 void Display_Process(void);
 void Display_Update(char p_L1, char p_L2, char p_L3, char p_L4);
 void enable_display_update(void);
@@ -61,7 +75,7 @@ void lcd_4line(void);
 void lcd_out(char *s, char line, char position);
 void lcd_rotate(char view);
 
-// Ports
+/* ---- Ports ---------------------------------------------------------------- */
 void Init_Ports(void);
 void Init_Port1(void);
 void Init_Port2(void);
@@ -70,7 +84,7 @@ void Init_Port4(void);
 void Init_Port5(void);
 void Init_Port6(void);
 
-// SPI
+/* ---- SPI ------------------------------------------------------------------ */
 void Init_SPI_B1(void);
 void SPI_B1_write(char byte);
 void spi_rs_data(void);
@@ -81,7 +95,7 @@ void SPI_test(void);
 void WriteIns(char instruction);
 void WriteData(char data);
 
-// Switches
+/* ---- Switches ------------------------------------------------------------- */
 void Init_Switches(void);
 void switch_control(void);
 void enable_switch_SW1(void);
@@ -95,7 +109,7 @@ void Switch2_Process(void);
 void menu_act(void);
 void menu_select(void);
 
-// Timers
+/* ---- Timers --------------------------------------------------------------- */
 void Init_Timers(void);
 void Init_Timer_B0(void);
 void Init_Timer_B1(void);
@@ -108,4 +122,5 @@ void measure_delay(void);
 void out_control_words(void);
 void delay_ms(unsigned int ms);
 
+void Update_Thumb_Display(void);
 #endif /* FUNCTIONS_H_ */

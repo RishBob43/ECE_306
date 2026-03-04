@@ -5,7 +5,6 @@
 #define SMCLK_ON               (0x01)
 #define PORTS                  (0x00)
 #define PWM_MODE               (0x01)
-#define WHEEL_OFF              (0x00)
 #define WHEEL_PERIOD          (50005)
 #define RIGHT_FORWARD_SPEED (TB3CCR2)
 #define LEFT_FORWARD_SPEED  (TB3CCR3)
