@@ -386,26 +386,26 @@ void Init_Port6(void){
     P6OUT  |=  LCD_BACKLITE;  /* Initial state: backlight ON                   */
     P6DIR  |=  LCD_BACKLITE;
 
-    /* P6.1  R_FORWARD – Timer B3 PWM */
-    P6SEL0 |=  R_FORWARD;
+    /* P6.1  R_FORWARD – GPIO output */
+    P6SEL0 &= ~R_FORWARD;   // was: P6SEL0 |= R_FORWARD
     P6SEL1 &= ~R_FORWARD;
     P6OUT  &= ~R_FORWARD;
     P6DIR  |=  R_FORWARD;
 
-    /* P6.2  L_FORWARD – Timer B3 PWM */
-    P6SEL0 |=  L_FORWARD;
+    /* P6.2  L_FORWARD – GPIO output */
+    P6SEL0 &= ~L_FORWARD;   // was: P6SEL0 |= L_FORWARD
     P6SEL1 &= ~L_FORWARD;
     P6OUT  &= ~L_FORWARD;
     P6DIR  |=  L_FORWARD;
 
-    /* P6.3  R_REVERSE – Timer B3 PWM */
-    P6SEL0 |=  R_REVERSE;
+    /* P6.3  R_REVERSE – GPIO output */
+    P6SEL0 &= ~R_REVERSE;   // was: P6SEL0 |= R_REVERSE
     P6SEL1 &= ~R_REVERSE;
     P6OUT  &= ~R_REVERSE;
     P6DIR  |=  R_REVERSE;
 
-    /* P6.4  L_REVERSE – Timer B3 PWM */
-    P6SEL0 |=  L_REVERSE;
+    /* P6.4  L_REVERSE – GPIO output */
+    P6SEL0 &= ~L_REVERSE;   // was: P6SEL0 |= L_REVERSE
     P6SEL1 &= ~L_REVERSE;
     P6OUT  &= ~L_REVERSE;
     P6DIR  |=  L_REVERSE;

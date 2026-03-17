@@ -62,8 +62,8 @@ extern volatile unsigned char display_changed;
 #define MOTORS_STOP()       do { P6OUT &= ~(R_FORWARD | L_FORWARD | \
                                              R_REVERSE | L_REVERSE); } while(0)
 
-#define MOTOR_TURN_LEFT()   do { P6OUT |=  R_FORWARD;               \
-                                 P6OUT &= ~(L_FORWARD | R_REVERSE | \
+#define MOTOR_TURN_BACK_RIGHT()   do { P6OUT |=  R_REVERSE;               \
+                                 P6OUT &= ~(L_FORWARD | R_FORWARD | \
                                              L_REVERSE); } while(0)
 
 /*------------------------------------------------------------------------------
@@ -80,6 +80,18 @@ static void set_line(int line, const char *msg){
  *   Format: "L:xxxx    "
  *------------------------------------------------------------------------------*/
 static void show_detector_value(void){
+    HEX_to_BCD(ADC_Right_Detect);
+    display_line[1][0] = 'R';
+    display_line[1][1] = ':';
+    display_line[1][2] = thousands;
+    display_line[1][3] = hundreds;
+    display_line[1][4] = tens;
+    display_line[1][5] = ones;
+    display_line[1][6] = ' ';
+    display_line[1][7] = ' ';
+    display_line[1][8] = ' ';
+    display_line[1][9] = ' ';
+    display_line[1][DISPLAY_LINE_LENGTH - 1] = RESET_STATE;
     HEX_to_BCD(ADC_Left_Detect);
     display_line[3][0] = 'L';
     display_line[3][1] = ':';
@@ -184,8 +196,8 @@ void main(void){
                     MOTORS_STOP();
                     state_timer = RESET_STATE;
                     state       = STATE_STOP_WAIT;
-                    set_line(2, "LINE DET  ");
-                    set_line(3, "          ");
+                    set_line(2, "   LINE   ");
+                    set_line(3, " DETECTED ");
                 }
                 break;
 
@@ -198,7 +210,7 @@ void main(void){
                     if(state_timer >= TICKS_4_SEC){
                         state_timer = RESET_STATE;
                         state       = STATE_TURN;
-                        MOTOR_TURN_LEFT();
+                        MOTOR_TURN_BACK_RIGHT();
                         set_line(2, "TURNING   ");
                     }
                 }

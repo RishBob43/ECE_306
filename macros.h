@@ -81,8 +81,8 @@
  *   Black surface -> high ADC value (low reflection -> pull-up dominates)
  *   White surface -> low  ADC value (high reflection -> transistor conducts)
  *------------------------------------------------------------------------------*/
-#define BLACK_LINE_THRESHOLD    (700u)
-#define WHITE_THRESHOLD         (400u)
+#define BLACK_LINE_THRESHOLD    (650u)
+#define WHITE_THRESHOLD         (125u)
 
 /*------------------------------------------------------------------------------
  * Line state bitmask return codes  [P6]
