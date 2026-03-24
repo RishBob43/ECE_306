@@ -94,8 +94,8 @@ extern volatile unsigned char display_changed;
 
 /*-- GPIO motor macros (for alignment and exit turns) ------------------------*/
 /*  Turn left: right wheel GPIO forward, left stopped                        */
-#define MOTOR_TURN_LEFT_GPIO()   do { P6OUT |=  R_FORWARD;                    \
-                                      P6OUT &= ~(L_FORWARD|R_REVERSE|L_REVERSE); } while(0)
+#define MOTOR_TURN_LEFT_GPIO()   do { P6OUT |=  L_REVERSE;                    \
+                                      P6OUT &= ~(R_FORWARD|L_FORWARD|R_REVERSE); } while(0)
 /*  Inward exit: left forward, right reverse                                  */
 #define MOTOR_INWARD_TURN_GPIO() do { P6OUT |=  (L_FORWARD | R_REVERSE);      \
                                       P6OUT &= ~(R_FORWARD | L_REVERSE);      } while(0)
@@ -245,7 +245,16 @@ static unsigned int average_adc_samples(unsigned char channel_flag){
     }
     return (sum / NUM_CAL_SAMPLES);
 }
-
+/*==============================================================================
+ * flush_display
+ *   Forces an immediate LCD write without waiting for the 200 ms tick.
+ *   Use only during blocking calibration phases where the main loop is stalled.
+ *==============================================================================*/
+static void flush_display(void){
+    display_changed = TRUE;
+    Display_Update(0, 0, 0, 0);
+    display_changed = FALSE;
+}
 /*==============================================================================
  * run_calibration
  *   Phase 0: emitter OFF -> ambient baseline
@@ -262,6 +271,8 @@ static void run_calibration(void){
     set_line(DISP_RIGHT_LINE, "Emitter   ");
     set_line(DISP_LEFT_LINE,  "OFF       ");
     set_line(DISP_TIMER_LINE, "Place:WHT ");
+    flush_display();
+
     settle = RESET_STATE;
     while(settle < TICKS_CAL_SETTLE){
         if(update_display){ update_display = FALSE; settle++; }
@@ -274,7 +285,9 @@ static void run_calibration(void){
     set_line(DISP_STATE_LINE, "CAL:WHITE ");
     set_line(DISP_RIGHT_LINE, "Emitter ON");
     set_line(DISP_LEFT_LINE,  "On White  ");
-    set_line(DISP_TIMER_LINE, "Place:WHT ");
+    set_line(DISP_TIMER_LINE, "Sampling..");
+    flush_display();
+
     settle = RESET_STATE;
     while(settle < TICKS_CAL_SETTLE){
         if(update_display){ update_display = FALSE; settle++; }
@@ -282,13 +295,40 @@ static void run_calibration(void){
     g_white_left  = average_adc_samples(0u);
     g_white_right = average_adc_samples(1u);
 
-    /* Phase 2 – black (emitter ON, user moves car to black tape) */
-    set_line(DISP_STATE_LINE, "CAL:BLACK ");
-    set_line(DISP_RIGHT_LINE, "Move to   ");
-    set_line(DISP_LEFT_LINE,  "BLACK line");
-    set_line(DISP_TIMER_LINE, "Place:BLK ");
+    /*--------------------------------------------------------------------------
+     * 4-second move window: emitter stays ON, display counts down.
+     * No ADC samples are taken during this period.
+     * User physically moves car from white area onto the black line.
+     *------------------------------------------------------------------------*/
+    set_line(DISP_STATE_LINE, "MOVE CAR  ");
+    set_line(DISP_RIGHT_LINE, "To BLACK  ");
+    set_line(DISP_LEFT_LINE,  "line now! ");
+    set_line(DISP_TIMER_LINE, "Wait: 4s  ");
+    flush_display();
+
     settle = RESET_STATE;
-    while(settle < TICKS_CAL_SETTLE * 3u){
+    while(settle < 20u){                  /* 20 × 200ms = 4 seconds            */
+        if(update_display){
+            update_display = FALSE;
+            settle++;
+
+            /* Countdown display: 4s, 3s, 2s, 1s, GO!                         */
+            if(settle == 5u)  { set_line(DISP_TIMER_LINE, "Wait: 3s  "); flush_display(); }
+            if(settle == 10u) { set_line(DISP_TIMER_LINE, "Wait: 2s  "); flush_display(); }
+            if(settle == 15u) { set_line(DISP_TIMER_LINE, "Wait: 1s  "); flush_display(); }
+            if(settle == 19u) { set_line(DISP_TIMER_LINE, "HOLD STILL"); flush_display(); }
+        }
+    }
+
+    /* Phase 2 – black (emitter ON, car now on black tape) */
+    set_line(DISP_STATE_LINE, "CAL:BLACK ");
+    set_line(DISP_RIGHT_LINE, "Sampling  ");
+    set_line(DISP_LEFT_LINE,  "BLACK line");
+    set_line(DISP_TIMER_LINE, "Sampling..");
+    flush_display();
+
+    settle = RESET_STATE;
+    while(settle < TICKS_CAL_SETTLE){
         if(update_display){ update_display = FALSE; settle++; }
     }
     g_black_left  = average_adc_samples(0u);
@@ -296,7 +336,6 @@ static void run_calibration(void){
 
     update_dynamic_threshold();
 }
-
 /*==============================================================================
  * update_dynamic_threshold
  *   Subtracts ambient baseline before computing the white/black midpoint.
@@ -315,12 +354,12 @@ static void update_dynamic_threshold(void){
 
     if(white_avg > ambient_avg){ white_avg -= ambient_avg; } else { white_avg = 0u; }
     if(black_avg > ambient_avg){ black_avg -= ambient_avg; } else { black_avg = 0u; }
-
-    if(black_avg > (white_avg + CAL_THRESHOLD_MARGIN)){
-        g_threshold = ((white_avg + black_avg) / 2u) + ambient_avg;
-    } else {
-        g_threshold = BLACK_LINE_THRESHOLD;   /* static fallback */
-    }
+    g_threshold = ((white_avg + black_avg) / 2u) + ambient_avg;
+//    if(black_avg > (white_avg + CAL_THRESHOLD_MARGIN)){
+//        g_threshold = ((white_avg + black_avg) / 2u) + ambient_avg;
+//    } else {
+//        g_threshold = BLACK_LINE_THRESHOLD;   /* static fallback */
+//    }
 }
 
 /*==============================================================================
@@ -478,13 +517,33 @@ void main(void){
 
             /*-- IDLE: show live ADC, wait for DAC ready and SW1 press -------*/
             case STATE_IDLE:
+
+                /* Show live detector values on lines 1 and 2 */
                 show_detector_values();
 
-                if(DAC_ready == FALSE){
-                    set_line(DISP_TIMER_LINE, "DAC RAMP  ");
+                /* Show computed threshold on line 3 */
+                HEX_to_BCD(g_threshold);
+                display_line[DISP_TIMER_LINE][0] = 'G';   /* G = threshold Gate value     */
+                display_line[DISP_TIMER_LINE][1] = ':';
+                display_line[DISP_TIMER_LINE][2] = thousands;
+                display_line[DISP_TIMER_LINE][3] = hundreds;
+                display_line[DISP_TIMER_LINE][4] = tens;
+                display_line[DISP_TIMER_LINE][5] = ones;
+                display_line[DISP_TIMER_LINE][6] = ' ';
+                display_line[DISP_TIMER_LINE][7] = ' ';
+                display_line[DISP_TIMER_LINE][8] = ' ';
+                display_line[DISP_TIMER_LINE][9] = ' ';
+                display_line[DISP_TIMER_LINE][DISPLAY_LINE_LENGTH - 1u] = RESET_STATE;
+                display_changed = TRUE;
+
+                /* Show DAC state on line 0 */
+                if(!DAC_ready){
+                    set_line(DISP_STATE_LINE, "DAC RAMP  ");
+                } else {
+                    set_line(DISP_STATE_LINE, "SW1 GO!   ");
                 }
 
-                if(sw1_pressed && (DAC_ready == TRUE)){
+                if(sw1_pressed && DAC_ready){
                     sw1_pressed    = FALSE;
                     g_timer_ticks  = RESET_STATE;
                     g_timer_active = FALSE;
@@ -503,7 +562,8 @@ void main(void){
                 if(state_timer >= TICKS_1_SEC){
                     state_timer    = RESET_STATE;
                     g_timer_active = TRUE;
-                    DAC_Set(DAC_CRUISE);          /* Set controlled speed voltage */
+                    IR_LED_control(IR_LED_ON);        /* <-- make sure emitter is ON       */
+                    DAC_Set(DAC_CRUISE);
                     MOTORS_PWM_STRAIGHT();
                     state = STATE_INTERCEPT;
                     set_line(DISP_STATE_LINE, "INTERCEPT ");
@@ -512,11 +572,30 @@ void main(void){
 
             /*-- INTERCEPT: drive forward until line detected ----------------*/
             case STATE_INTERCEPT:
-                if(get_line_state_dyn() != LINE_NONE){
-                    MOTORS_STOP();
-                    state_timer = RESET_STATE;
-                    state       = STATE_WAIT;
-                    set_line(DISP_STATE_LINE, "WAITING   ");
+
+                /* Debug: show live line state code on line 0 while intercepting          */
+                {
+                    unsigned char ls = get_line_state_dyn();
+
+                    display_line[DISP_STATE_LINE][0] = 'I';
+                    display_line[DISP_STATE_LINE][1] = 'N';
+                    display_line[DISP_STATE_LINE][2] = 'T';
+                    display_line[DISP_STATE_LINE][3] = ':';
+                    display_line[DISP_STATE_LINE][4] = (char)((ls & LINE_LEFT)  ? 'L' : '-');
+                    display_line[DISP_STATE_LINE][5] = (char)((ls & LINE_RIGHT) ? 'R' : '-');
+                    display_line[DISP_STATE_LINE][6] = ' ';
+                    display_line[DISP_STATE_LINE][7] = ' ';
+                    display_line[DISP_STATE_LINE][8] = ' ';
+                    display_line[DISP_STATE_LINE][9] = ' ';
+                    display_line[DISP_STATE_LINE][DISPLAY_LINE_LENGTH - 1u] = RESET_STATE;
+                    display_changed = TRUE;
+
+                    if(ls != LINE_NONE){
+                        MOTORS_STOP();
+                        state_timer = RESET_STATE;
+                        state       = STATE_WAIT;
+                        set_line(DISP_STATE_LINE, "WAITING   ");
+                    }
                 }
                 break;
 

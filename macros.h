@@ -146,10 +146,10 @@
 #define TICKS_ALIGN_TIMEOUT     (40u)
 
 /*  Settle ticks after toggling emitter during calibration (3 = 600 ms).       */
-#define TICKS_CAL_SETTLE        (3u)
+#define TICKS_CAL_SETTLE        (15u)  /* 15 × 200ms = 3s per phase            */
 
 /*  Number of ADC samples averaged per calibration phase.                      */
-#define NUM_CAL_SAMPLES         (8u)
+#define NUM_CAL_SAMPLES         (16u)
 
 /*  Minimum ADC count margin between white average and black average required
  *  before accepting the dynamic threshold (prevents noise from setting a

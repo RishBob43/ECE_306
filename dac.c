@@ -149,7 +149,6 @@ void DAC_Ramp_Step(void){
 void DAC_Set(unsigned int value){
 
     if(value > DAC_MAX_VALUE){ value = DAC_MAX_VALUE; }
-    if(value < DAC_MIN_VALUE){ value = DAC_MIN_VALUE; }
 
     DAC_data = value;
     SAC3DAT  = DAC_data;
