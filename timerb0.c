@@ -61,8 +61,9 @@ void Init_Timer_B0(void){
  *   All duty cycles start at WHEEL_OFF (motors stopped).
  *------------------------------------------------------------------------------*/
 void Init_Timer_B3(void){
-    TB3CTL   = TBSSEL__SMCLK | TBCLR;
+    TB3CTL   = TBSSEL__SMCLK
     TB3CTL  |= MC__UP;
+    TB3CTL |= TBCLR; // Clear TAR
     TB3CCR0  = WHEEL_PERIOD;
     TB3CCTL2 = OUTMOD_7;    TB3CCR2 = WHEEL_OFF;
     TB3CCTL3 = OUTMOD_7;    TB3CCR3 = WHEEL_OFF;
