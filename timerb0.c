@@ -7,7 +7,9 @@
  *              CCR0  - Fires every 200 ms, sets update_display.
  *              CCR1  - 100 ms debounce slice for SW1.
  *              CCR2  - 100 ms debounce slice for SW2.
- *              Timer B3 - Motor GPIO (PWM registers unused).
+ *              OVF   - TB0 overflow: drives DAC soft-start ramp via
+ *                      DAC_Ramp_Step() until DAC_ready is set.
+ *              Timer B3 - Motor PWM (CCR2-CCR5 for wheel speeds).
  *------------------------------------------------------------------------------*/
 
 #include "msp430.h"
@@ -16,6 +18,7 @@
 #include "ports.h"
 #include "macros.h"
 #include "timerB0.h"
+#include "dac.h"
 
 extern volatile unsigned char update_display;
 extern volatile unsigned char display_changed;
@@ -45,12 +48,17 @@ void Init_Timer_B0(void){
     TB0CCR2  = TB0CCR2_DEBOUNCE_SLICE;
     TB0CCTL2 = RESET_STATE;
 
+    /* Overflow interrupt is enabled by Init_DAC() when the DAC ramp starts.
+     * It is disabled automatically by DAC_Ramp_Step() when ramp completes.
+     * Leave TBIE cleared here so no spurious overflow fires before Init_DAC. */
     TB0CTL &= ~TBIE;
     TB0CTL &= ~TBIFG;
 }
 
 /*------------------------------------------------------------------------------
  * Init_Timer_B3
+ *   Motor PWM: UP mode, WHEEL_PERIOD, OUTMOD_7 (reset/set) on CCR2-CCR5.
+ *   All duty cycles start at WHEEL_OFF (motors stopped).
  *------------------------------------------------------------------------------*/
 void Init_Timer_B3(void){
     TB3CTL   = TBSSEL__SMCLK | TBCLR;
@@ -73,7 +81,6 @@ void Init_Timers(void){
 /*==============================================================================
  * TIMER0_B0_VECTOR  –  CCR0
  * Fires every 200 ms. Sets update_display for the foreground.
- * Backlight is left alone - stays on permanently.
  *==============================================================================*/
 #pragma vector = TIMER0_B0_VECTOR
 __interrupt void Timer0_B0_ISR(void){
@@ -82,14 +89,19 @@ __interrupt void Timer0_B0_ISR(void){
 }
 
 /*==============================================================================
- * TIMER0_B1_VECTOR  –  CCR1, CCR2
- * Debounce slice handlers. Re-enables switch interrupts after 1 second.
+ * TIMER0_B1_VECTOR  –  CCR1, CCR2, overflow (IV=14)
+ *
+ * CCR1 / CCR2 – switch debounce slices (re-enable switch interrupt after 1 s)
+ * Overflow    – DAC soft-start ramp step; auto-disables when ramp is complete
  *==============================================================================*/
 #pragma vector = TIMER0_B1_VECTOR
 __interrupt void Timer0_B1_ISR(void){
 
     switch(TB0IV){
 
+        /*----------------------------------------------------------------------
+         * CCR1 – SW1 debounce
+         *--------------------------------------------------------------------*/
         case TB0IV_TB0CCR1:
             TB0CCR1 += TB0CCR1_DEBOUNCE_SLICE;
 
@@ -105,6 +117,9 @@ __interrupt void Timer0_B1_ISR(void){
             }
             break;
 
+        /*----------------------------------------------------------------------
+         * CCR2 – SW2 debounce
+         *--------------------------------------------------------------------*/
         case TB0IV_TB0CCR2:
             TB0CCR2 += TB0CCR2_DEBOUNCE_SLICE;
 
@@ -118,6 +133,15 @@ __interrupt void Timer0_B1_ISR(void){
                     P2IE  |=  SW2;
                 }
             }
+            break;
+
+        /*----------------------------------------------------------------------
+         * Overflow (TB0IV = 14) – DAC soft-start ramp
+         *   DAC_Ramp_Step() decrements SAC3DAT each overflow until the
+         *   operating voltage is reached, then disables TBIE itself.
+         *--------------------------------------------------------------------*/
+        case TB0IV_TB0IFG:
+            DAC_Ramp_Step();
             break;
 
         default:

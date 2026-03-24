@@ -43,7 +43,10 @@ void outchar(char character);
 
 //------------------------------------------------------------------------------
 
+#ifndef NULL
 #define NULL ((void *) 0x0)
+#endif
+
 //#define LCD_INTERVAL         12500 // 8,000,000 / 8 / 8 / [1/100msec] = 12500
 
 // LCD
@@ -52,7 +55,7 @@ void outchar(char character);
 #define LCD_HOME_L3           0xC0
 #define LCD_HOME_L4           0xE0
 
-#define DISPLAY_ON 	          0x04
+#define DISPLAY_ON            0x04
 #define DISPLAY_OFF           0x03
 #define CURSOR_ON             0x02
 #define CURSOR_OFF            0x05
@@ -106,4 +109,3 @@ void outchar(char character);
 
 #define START_WR_INSTRUCTION  0x1f
 #define START_WR_DATA         0x5f
-
