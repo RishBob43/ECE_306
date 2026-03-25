@@ -59,9 +59,9 @@
  *   2. Add Kd in small steps until oscillation damps cleanly.
  *   3. Add Ki last, in very small steps, only if steady offset persists.
  *------------------------------------------------------------------------------*/
-#define PID_KP                  (15)     /* Proportional gain * GAIN_SCALE      */
+#define PID_KP                  (8000)     /* Proportional gain * GAIN_SCALE      */
 #define PID_KI                  (0)      /* Integral     gain * GAIN_SCALE      */
-#define PID_KD                  (5)      /* Derivative   gain * GAIN_SCALE      */
+#define PID_KD                  (0)      /* Derivative   gain * GAIN_SCALE      */
 
 /*------------------------------------------------------------------------------
  * Anti-windup: clamp the integral accumulator to ±PID_INTEGRAL_LIMIT.
@@ -75,7 +75,7 @@
  * applied to the CCR registers.  Set to half of PID_BASE_SPEED so a full
  * correction can swing one wheel to zero without going negative.
  *------------------------------------------------------------------------------*/
-#define PID_OUTPUT_LIMIT        (3000)
+#define PID_OUTPUT_LIMIT        (6000)
 
 /*------------------------------------------------------------------------------
  * PID_State – all persistent state for one controller instance

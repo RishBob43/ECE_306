@@ -40,7 +40,7 @@
  *   Lower  value  = higher output voltage
  *------------------------------------------------------------------------------*/
 #define DAC_BEGIN               (2725u)  /* ~2.0 V – soft-start initial value  */
-#define DAC_CRUISE              (1200u)  /* ~4.3 V – controlled line-follow speed */
+#define DAC_CRUISE              (1500u)  /*  4V – controlled line-follow speed */
 #define DAC_LIMIT               (850u)   /* ~6.08 V – full speed ceiling        */
 #define DAC_ADJUST              (DAC_LIMIT) /* Settle point after ramp completes */
 #define DAC_RAMP_STEP           (100u)   /* Decrement per TB0 overflow tick     */
@@ -57,9 +57,9 @@
  * These are kept here (not macros.h) because they are tightly coupled to the
  * DAC voltage level.  If DAC_CRUISE changes, re-evaluate PID_BASE_SPEED.
  *------------------------------------------------------------------------------*/
-#define PID_BASE_SPEED          (6000u)  /* TB3CCR duty at straight-ahead       */
-#define PID_MIN_SPEED           (1500u)  /* minimum CCR – keep wheels turning   */
-#define PID_MAX_SPEED           (12000u) /* maximum CCR – below WHEEL_PERIOD    */
+#define PID_BASE_SPEED          (20000u)  /* TB3CCR duty at straight-ahead       */
+#define PID_MIN_SPEED           (12000u)  /* minimum CCR – keep wheels turning   */
+#define PID_MAX_SPEED           (50000u) /* maximum CCR – below WHEEL_PERIOD    */
 
 /*------------------------------------------------------------------------------
  * Extern: DAC_data is modified by both Init_DAC() and the TB0 overflow ISR.

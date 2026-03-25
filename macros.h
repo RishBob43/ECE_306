@@ -135,7 +135,7 @@
 /*  Number of right-detector white->black rising edges that constitute 2 laps.
  *  Empirically determined: on a 36-inch circle, the right sensor crosses the
  *  black-to-edge boundary approximately twice per lap.  Start with 4 and tune. */
-#define LAP_EDGE_COUNT          (4u)
+#define LAP_EDGE_COUNT          (100u)
 
 /*  Duration of the inward exit turn + straight drive (in 200 ms ticks).
  *  12 ticks = 2.4 s.  Tune based on circle radius and motor speed.           */

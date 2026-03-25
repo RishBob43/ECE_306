@@ -8,7 +8,6 @@
  *   - PID steering controller (P + I + D, integer arithmetic)
  *   - DAC-controlled motor supply voltage via LT1935 buck-boost (~4.3 V)
  *   - TB3 PWM differential steering during turns only
- *   - GPIO straight drive during INTERCEPT and CIRCLE (no PWM needed)
  *   - Two-lap counter using right-detector rising-edge detection
  *   - Automatic inward exit to circle center
  *
@@ -22,7 +21,7 @@
  * Motor drive strategy:
  *   INTERCEPT / CIRCLE straight: GPIO P6OUT, both forward pins HIGH, no PWM.
  *   PID turns (CIRCLE steering):  TB3 CCR2/CCR3 differential PWM.
- *   Alignment turn / exit turn:   GPIO only.
+ *   Alignment turn / exit turn:
  *   DAC_CRUISE (~4.3 V) limits top speed; PID modulates left/right split.
  *
  * State machine:
@@ -116,6 +115,7 @@ static volatile unsigned char g_timer_active = FALSE;
 
 static unsigned char g_lap_edges        = RESET_STATE;
 static unsigned char g_prev_right_black = FALSE;
+static unsigned char g_exit_phase = RESET_STATE;   /* 0 = turning, 1 = straight */
 
 static PID_State g_pid;
 
@@ -262,12 +262,18 @@ static unsigned int average_adc_samples(unsigned char channel_flag){
 static void run_calibration(void){
 
     unsigned char settle;
+    settle = RESET_STATE;
+       while(settle < 5u){
+           if(update_display_count > 0u){
+               update_display_count--;
+               settle++;
+           }
+       }
 
     /*-- Phase 1: white ------------------------------------------------------*/
     IR_LED_control(IR_LED_ON);
     set_line(DISP_STATE_LINE, "CAL:WHITE ");
-    set_line(DISP_RIGHT_LINE, "Emitter ON");
-    set_line(DISP_LEFT_LINE,  "On White  ");
+    show_detector_values();
     set_line(DISP_TIMER_LINE, "Sampling..");
     flush_display();
 
@@ -283,8 +289,7 @@ static void run_calibration(void){
 
     /*-- 4-second move window: user moves car from white to black tape -------*/
     set_line(DISP_STATE_LINE, "MOVE CAR  ");
-    set_line(DISP_RIGHT_LINE, "To BLACK  ");
-    set_line(DISP_LEFT_LINE,  "line now! ");
+    show_detector_values();
     set_line(DISP_TIMER_LINE, "Wait: 4s  ");
     flush_display();
 
@@ -302,8 +307,7 @@ static void run_calibration(void){
 
     /*-- Phase 2: black ------------------------------------------------------*/
     set_line(DISP_STATE_LINE, "CAL:BLACK ");
-    set_line(DISP_RIGHT_LINE, "Sampling  ");
-    set_line(DISP_LEFT_LINE,  "BLACK line");
+    show_detector_values();
     set_line(DISP_TIMER_LINE, "Sampling..");
     flush_display();
 
@@ -332,7 +336,7 @@ static void update_dynamic_threshold(void){
     unsigned int black_avg = (g_black_left  + g_black_right) / 2u;
 
     if(black_avg > (white_avg + CAL_THRESHOLD_MARGIN)){
-        g_threshold = (white_avg + black_avg) / 2u;
+        g_threshold = (white_avg + 5 * black_avg) / 6u;
     } else {
         g_threshold = BLACK_LINE_THRESHOLD;   /* static fallback from macros.h */
     }
@@ -421,7 +425,7 @@ void main(void){
     Init_Switches();
 
     MOTORS_STOP_ALL();
-    IR_LED_control(IR_LED_OFF);
+    IR_LED_control(IR_LED_ON);
     PID_Init(&g_pid);
 
     set_line(DISP_STATE_LINE, "PROJECT 7 ");
@@ -484,21 +488,20 @@ void main(void){
 
                 /* Display computed threshold on line 1 */
                 HEX_to_BCD(g_threshold);
-                display_line[DISP_RIGHT_LINE][0] = 'T';
-                display_line[DISP_RIGHT_LINE][1] = 'H';
-                display_line[DISP_RIGHT_LINE][2] = ':';
-                display_line[DISP_RIGHT_LINE][3] = thousands;
-                display_line[DISP_RIGHT_LINE][4] = hundreds;
-                display_line[DISP_RIGHT_LINE][5] = tens;
-                display_line[DISP_RIGHT_LINE][6] = ones;
-                display_line[DISP_RIGHT_LINE][7] = ' ';
-                display_line[DISP_RIGHT_LINE][8] = ' ';
-                display_line[DISP_RIGHT_LINE][9] = ' ';
-                display_line[DISP_RIGHT_LINE][DISPLAY_LINE_LENGTH-1u] = RESET_STATE;
+                display_line[DISP_TIMER_LINE][0] = 'T';
+                display_line[DISP_TIMER_LINE][1] = 'H';
+                display_line[DISP_TIMER_LINE][2] = ':';
+                display_line[DISP_TIMER_LINE][3] = thousands;
+                display_line[DISP_TIMER_LINE][4] = hundreds;
+                display_line[DISP_TIMER_LINE][5] = tens;
+                display_line[DISP_TIMER_LINE][6] = ones;
+                display_line[DISP_TIMER_LINE][7] = ' ';
+                display_line[DISP_TIMER_LINE][8] = ' ';
+                display_line[DISP_TIMER_LINE][9] = ' ';
+                display_line[DISP_TIMER_LINE][DISPLAY_LINE_LENGTH-1u] = RESET_STATE;
 
                 set_line(DISP_STATE_LINE, "CAL DONE  ");
-                set_line(DISP_LEFT_LINE,  "SW1=GO    ");
-                set_line(DISP_TIMER_LINE, "T:  0.0s  ");
+                show_detector_values();
                 flush_display();
 
                 Init_DAC();   /* Start DAC soft-start ramp while user reads LCD */
@@ -571,8 +574,11 @@ void main(void){
                     state_timer    = RESET_STATE;
                     g_timer_active = TRUE;
                     IR_LED_control(IR_LED_ON);
-                    DAC_Set(DAC_CRUISE);        /* ~4.3 V – controlled speed   */
-                    MOTORS_GPIO_FORWARD();      /* GPIO straight, no PWM       */
+                    DAC_Set(DAC_CRUISE);        /*  controlled speed   */
+                    TB3CCR2 = PID_BASE_SPEED;   /* R_FORWARD */
+                    TB3CCR3 = PID_BASE_SPEED;   /* L_FORWARD */
+                    TB3CCR4 = WHEEL_OFF;
+                    TB3CCR5 = WHEEL_OFF;
                     state = STATE_INTERCEPT;
                     set_line(DISP_STATE_LINE, "INTERCEPT ");
                 }
@@ -594,7 +600,11 @@ void main(void){
                 if(state_timer >= TICKS_4_SEC){
                     state_timer = RESET_STATE;
                     state       = STATE_ALIGN;
-                    MOTOR_TURN_LEFT_GPIO();
+                    /* Left turn: right wheel forward, left wheel reverse */
+                    TB3CCR2 = PID_MIN_SPEED;   /* R_FORWARD */
+                    TB3CCR3 = WHEEL_OFF;
+                    TB3CCR4 = WHEEL_OFF;
+                    TB3CCR5 = PID_MIN_SPEED;   /* L_REVERSE */
                     set_line(DISP_STATE_LINE, "TURNING   ");
                 }
                 break;
@@ -634,25 +644,44 @@ void main(void){
                     g_prev_right_black = cur_right;
                 }
 
-                if(g_lap_edges >= LAP_EDGE_COUNT){
-                    MOTORS_STOP_ALL();
-                    state_timer = RESET_STATE;
-                    state       = STATE_EXIT;
-                    MOTOR_INWARD_TURN_GPIO();
-                    set_line(DISP_STATE_LINE, "EXITING   ");
-                }
+//                if(g_lap_edges >= LAP_EDGE_COUNT){
+//                    MOTORS_STOP_ALL();
+//                    state_timer = RESET_STATE;
+//                    state       = STATE_EXIT;
+//                    /* Inward exit turn: left forward, right reverse */
+//                    TB3CCR2 = WHEEL_OFF;
+//                    TB3CCR3 = PID_BASE_SPEED;   /* L_FORWARD */
+//                    TB3CCR4 = PID_BASE_SPEED;   /* R_REVERSE */
+//                    TB3CCR5 = WHEEL_OFF;
+//                    set_line(DISP_STATE_LINE, "EXITING   ");
+//                }
                 break;
-
-            /*-- EXIT: inward GPIO turn + drive to center --------------------*/
+            /*-- EXIT: inward turn then drive to center ---------------------------------*/
             case STATE_EXIT:
                 if(tick_200ms){ state_timer++; }
-                if(state_timer >= TICKS_EXIT_DRIVE){
-                    MOTORS_STOP_ALL();
-                    g_timer_active = FALSE;
-                    state = STATE_STOPPED;
-                    set_line(DISP_STATE_LINE, "STOPPED   ");
-                    show_detector_values();
-                    show_timer();
+
+                if(g_exit_phase == 0u){
+                    /* Phase 0: inward turn for TICKS_TURN duration */
+                    if(state_timer >= TICKS_TURN){
+                        state_timer = RESET_STATE;
+                        g_exit_phase = 1u;
+                        /* Stop turn, drive straight forward */
+                        TB3CCR2 = PID_BASE_SPEED;   /* R_FORWARD */
+                        TB3CCR3 = PID_BASE_SPEED;   /* L_FORWARD */
+                        TB3CCR4 = WHEEL_OFF;
+                        TB3CCR5 = WHEEL_OFF;
+                    }
+                } else {
+                    /* Phase 1: drive straight to center for TICKS_EXIT_DRIVE duration */
+                    if(state_timer >= TICKS_EXIT_DRIVE){
+                        MOTORS_STOP_ALL();
+                        g_timer_active = FALSE;
+                        g_exit_phase   = RESET_STATE;   /* reset for next run */
+                        state = STATE_STOPPED;
+                        set_line(DISP_STATE_LINE, "STOPPED   ");
+                        show_detector_values();
+                        show_timer();
+                    }
                 }
                 break;
 
