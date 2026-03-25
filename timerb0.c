@@ -61,9 +61,8 @@ void Init_Timer_B0(void){
  *   All duty cycles start at WHEEL_OFF (motors stopped).
  *------------------------------------------------------------------------------*/
 void Init_Timer_B3(void){
-    TB3CTL   = TBSSEL__SMCLK;
+    TB3CTL   = TBSSEL__SMCLK | TBCLR;
     TB3CTL  |= MC__UP;
-    TB3CTL |= TBCLR; // Clear TAR
     TB3CCR0  = WHEEL_PERIOD;
     TB3CCTL2 = OUTMOD_7;    TB3CCR2 = WHEEL_OFF;
     TB3CCTL3 = OUTMOD_7;    TB3CCR3 = WHEEL_OFF;
@@ -81,12 +80,14 @@ void Init_Timers(void){
 
 /*==============================================================================
  * TIMER0_B0_VECTOR  –  CCR0
- * Fires every 200 ms. Sets update_display for the foreground.
+ * Fires every 200 ms. Increments update_display_count (queued tick counter).
+ * Foreground consumes one count per main-loop pass - no ticks are dropped
+ * if display writes or ADC reads take longer than 200 ms.
  *==============================================================================*/
 #pragma vector = TIMER0_B0_VECTOR
 __interrupt void Timer0_B0_ISR(void){
     TB0CCR0 += TB0CCR0_INTERVAL;
-    update_display = TRUE;
+    update_display_count++;          /* Queue tick; foreground drains it */
 }
 
 /*==============================================================================
