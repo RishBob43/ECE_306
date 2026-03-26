@@ -127,7 +127,7 @@
  *------------------------------------------------------------------------------*/
 #define TICKS_1_SEC             (5u)      /* 5  * 200 ms = 1 s                  */
 #define TICKS_4_SEC             (20u)     /* 20 * 200 ms = 4 s                  */
-#define TICKS_TURN              (8u)      /* 8  * 200 ms = 1.6 s                */
+#define TICKS_TURN              (2u)      /* 8  * 200 ms = .6 s                */
 
 /*------------------------------------------------------------------------------
  * Project 7 – circle follower parameters  [P7]
@@ -139,7 +139,7 @@
 
 /*  Duration of the inward exit turn + straight drive (in 200 ms ticks).
  *  12 ticks = 2.4 s.  Tune based on circle radius and motor speed.           */
-#define TICKS_EXIT_DRIVE        (12u)
+#define TICKS_EXIT_DRIVE        (8u)
 
 /*  Maximum ticks allowed for the ALIGN rotation before safety timeout.
  *  40 ticks = 8 s.                                                            */

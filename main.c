@@ -1,15 +1,21 @@
 /*------------------------------------------------------------------------------
- * File:        main.c  (Project 7 – PID + DAC)
+ * File:        main.c  (Project 7 – Bang-Bang + DAC)
  * Target:      MSP430FR2355
  *
  * Description: Black-line circle follower with:
  *   - Two-phase calibration (white then black, emitter ON throughout)
  *   - Dynamic threshold = midpoint of white/black averages
- *   - PID steering controller (P + I + D, integer arithmetic)
+ *   - Modified bang-bang steering controller (4-case + last-direction memory)
  *   - DAC-controlled motor supply voltage via LT1935 buck-boost (~4.3 V)
- *   - TB3 PWM differential steering during turns only
+ *   - TB3 PWM differential steering
  *   - Two-lap counter using right-detector rising-edge detection
  *   - Automatic inward exit to circle center
+ *
+ * Bang-bang controller cases:
+ *   BOTH on line   -> drive straight, both wheels at BASE_SPEED
+ *   LEFT off line  -> steer right: slow left wheel, speed right wheel
+ *   RIGHT off line -> steer left:  slow right wheel, speed left wheel
+ *   BOTH off line  -> use g_last_correction to repeat last known good turn
  *
  * Tick handling (dropped-tick fix):
  *   The CCR0 ISR increments update_display_count each 200 ms instead of
@@ -17,12 +23,6 @@
  *   sets tick_200ms = TRUE for that pass.  If the loop runs slow (LCD, ADC)
  *   the count queues up and the next pass catches up immediately – no ticks
  *   are silently dropped.
- *
- * Motor drive strategy:
- *   INTERCEPT / CIRCLE straight: GPIO P6OUT, both forward pins HIGH, no PWM.
- *   PID turns (CIRCLE steering):  TB3 CCR2/CCR3 differential PWM.
- *   Alignment turn / exit turn:
- *   DAC_CRUISE (~4.3 V) limits top speed; PID modulates left/right split.
  *
  * State machine:
  *   CALIBRATE -> IDLE -> DELAY -> INTERCEPT -> WAIT -> ALIGN
@@ -45,7 +45,6 @@
 #include "ADC.h"
 #include "hex_to_bcd.h"
 #include "dac.h"
-#include "pid.h"
 
 /*==============================================================================
  * Externs
@@ -64,7 +63,6 @@ extern volatile unsigned char display_changed;
  *       TICKS_ALIGN_TIMEOUT, TICKS_CAL_SETTLE, NUM_CAL_SAMPLES, and
  *       CAL_THRESHOLD_MARGIN are defined in macros.h.
  *       PID_BASE_SPEED, PID_MIN_SPEED, PID_MAX_SPEED are in dac.h.
- *       PID gains and limits are in pid.h.
  *       None are redefined here to avoid #48-D redefinition warnings.
  *============================================================================*/
 
@@ -101,6 +99,13 @@ extern volatile unsigned char display_changed;
 #define DISP_LEFT_LINE          (2u)
 #define DISP_TIMER_LINE         (3u)
 
+/*-- Bang-bang last-correction direction codes --------------------------------*/
+/*  Stored in g_last_correction so the BOTH-off-line case knows which way    */
+/*  to keep turning.                                                          */
+#define CORRECTION_NONE         (0x00)   /* No correction applied yet         */
+#define CORRECTION_LEFT         (0x01)   /* Last correction steered left      */
+#define CORRECTION_RIGHT        (0x02)   /* Last correction steered right     */
+
 /*==============================================================================
  * Module globals
  *============================================================================*/
@@ -115,9 +120,12 @@ static volatile unsigned char g_timer_active = FALSE;
 
 static unsigned char g_lap_edges        = RESET_STATE;
 static unsigned char g_prev_right_black = FALSE;
-static unsigned char g_exit_phase = RESET_STATE;   /* 0 = turning, 1 = straight */
+static unsigned char g_exit_phase       = RESET_STATE;   /* 0=turning, 1=straight */
 
-static PID_State g_pid;
+/*-- Bang-bang direction memory -----------------------------------------------*/
+/*  Updated every time the LEFT-off or RIGHT-off case fires.  Used by the    */
+/*  BOTH-off case to maintain the last known good correction direction.       */
+static unsigned char g_last_correction  = CORRECTION_NONE;
 
 /*==============================================================================
  * Forward declarations
@@ -132,8 +140,7 @@ static void          update_dynamic_threshold(void);
 static unsigned char is_black_left_dyn(void);
 static unsigned char is_black_right_dyn(void);
 static unsigned char get_line_state_dyn(void);
-static void          line_follow_pid(void);
-static void          clamp_ccr(volatile unsigned int *ccr, unsigned int val);
+static void          line_follow_bangbang(void);
 
 /*==============================================================================
  * set_line – copy 10-char literal into display buffer and flag changed
@@ -336,7 +343,7 @@ static void update_dynamic_threshold(void){
     unsigned int black_avg = (g_black_left  + g_black_right) / 2u;
 
     if(black_avg > (white_avg + CAL_THRESHOLD_MARGIN)){
-        g_threshold = (white_avg + 5 * black_avg) / 6u;
+        g_threshold = (white_avg + 9 * black_avg) / 10;
     } else {
         g_threshold = BLACK_LINE_THRESHOLD;   /* static fallback from macros.h */
     }
@@ -346,7 +353,7 @@ static void update_dynamic_threshold(void){
  * Threshold-based detection helpers
  *==============================================================================*/
 static unsigned char is_black_left_dyn(void){
-    return (ADC_Left_Detect  > g_threshold) ? TRUE : FALSE;
+    return (ADC_Left_Detect + 5  > g_threshold) ? TRUE : FALSE;
 }
 static unsigned char is_black_right_dyn(void){
     return (ADC_Right_Detect > g_threshold) ? TRUE : FALSE;
@@ -359,50 +366,85 @@ static unsigned char get_line_state_dyn(void){
 }
 
 /*==============================================================================
- * clamp_ccr – write val to *ccr, clamped to [PID_MIN_SPEED, PID_MAX_SPEED]
+ * line_follow_bangbang
+ *
+ * Modified bang-bang steering using TB3 PWM on the forward channels.
+ * Four cases based on which detectors see the black line:
+ *
+ * Case 1  BOTH on line   -> straight ahead, both wheels at PID_BASE_SPEED.
+ * g_last_correction is NOT updated.
+ *
+ * Case 2  LEFT off line  -> drifted right; steer left.
+ * Left wheel slows to PID_MIN_SPEED,
+ * Right wheel at PID_BASE_SPEED.
+ * g_last_correction = CORRECTION_LEFT.
+ *
+ * Case 3  RIGHT off line -> drifted left; steer right.
+ * Right wheel slows to PID_MIN_SPEED,
+ * Left wheel at PID_BASE_SPEED.
+ * g_last_correction = CORRECTION_RIGHT.
+ *
+ * Case 4  BOTH off line  -> completely lost; repeat last correction at
+ * full authority.
+ * If no correction has been applied yet
+ * (CORRECTION_NONE) default to steering left,
+ * which is the correct bias for a CCW circle.
  *==============================================================================*/
-static void clamp_ccr(volatile unsigned int *ccr, unsigned int val){
-    if(val < PID_MIN_SPEED){ val = PID_MIN_SPEED; }
-    if(val > PID_MAX_SPEED){ val = PID_MAX_SPEED; }
-    *ccr = val;
-}
+static void line_follow_bangbang(void){
 
-/*==============================================================================
- * line_follow_pid
- *
- * PID differential steering using TB3 PWM on the forward channels.
- * Straight sections use GPIO (MOTORS_GPIO_FORWARD) for simplicity; this
- * function is called when a steering correction is needed.
- *
- * error      = ADC_Right_Detect - ADC_Left_Detect  (signed)
- * correction = PID_Update(error)
- * R_FORWARD CCR = PID_BASE_SPEED - correction   (right slows on right drift)
- * L_FORWARD CCR = PID_BASE_SPEED + correction   (left  speeds on right drift)
- *
- * When correction ≈ 0 the car drives straight at PID_BASE_SPEED on both wheels.
- *==============================================================================*/
-static void line_follow_pid(void){
+    unsigned char left_black  = is_black_left_dyn();
+    unsigned char right_black = is_black_right_dyn();
 
-    int error;
-    int correction;
-    int right_speed;
-    int left_speed;
+    /* Clear GPIO forward bits so PWM drives the H-bridge exclusively */
+    P6OUT &= ~(R_FORWARD | L_FORWARD | R_REVERSE | L_REVERSE);
 
-    error = (int)ADC_Right_Detect - (int)ADC_Left_Detect;
-
-    correction = PID_Update(&g_pid, error);
-
-    right_speed = (int)PID_BASE_SPEED - correction;
-    left_speed  = (int)PID_BASE_SPEED + correction;
-
-    /* PWM on forward channels; reverse always off during circle following   */
-    clamp_ccr(&TB3CCR2, (unsigned int)right_speed);   /* R_FORWARD          */
-    clamp_ccr(&TB3CCR3, (unsigned int)left_speed);    /* L_FORWARD          */
+    /* Reverse channels always off during line following */
     TB3CCR4 = WHEEL_OFF;
     TB3CCR5 = WHEEL_OFF;
 
-    /* Make sure GPIO forward pins are clear – PWM controls the output now   */
-    P6OUT &= ~(R_FORWARD | L_FORWARD | R_REVERSE | L_REVERSE);
+    if(left_black && right_black){
+        /*----------------------------------------------------------------------
+         * Case 1: BOTH sensors on black line -> go straight.
+         *--------------------------------------------------------------------*/
+        TB3CCR2 = 15000;    /* R_FORWARD */
+        TB3CCR3 = 15000;    /* L_FORWARD */
+
+    } else if(!left_black && right_black){
+        /*----------------------------------------------------------------------
+         * Case 2: LEFT sensor off line, RIGHT on line.
+         * Car has drifted right of the line edge -> steer left.
+         * Slow the left wheel to pivot toward the line.
+         *--------------------------------------------------------------------*/
+        RIGHT_REVERSE_SPEED = PID_MIN_SPEED;     /* R_FORWARD – slow right wheel */
+        TB3CCR3 = PID_BASE_SPEED;    /* L_FORWARD – full left wheel  */
+        g_last_correction = CORRECTION_RIGHT;
+
+    } else if(left_black && !right_black){
+        /*----------------------------------------------------------------------
+         * Case 3: RIGHT sensor off line, LEFT on line.
+         * Car has drifted left of the line edge -> steer right.
+         * Slow the right wheel to pivot toward the line.
+         *--------------------------------------------------------------------*/
+        TB3CCR2 = PID_BASE_SPEED;    /* R_FORWARD – full right wheel */
+        LEFT_REVERSE_SPEED = PID_MIN_SPEED;     /* L_FORWARD – slow left wheel  */
+        g_last_correction = CORRECTION_LEFT;
+
+    }
+     else {
+        /*----------------------------------------------------------------------
+         * Case 4: BOTH sensors off line -> completely lost.
+         * Match the last correction direction at full authority.
+         *--------------------------------------------------------------------*/
+        if(g_last_correction == CORRECTION_RIGHT){
+            /* steering right */
+            RIGHT_REVERSE_SPEED = PID_MIN_SPEED;     /* R_FORWARD – slow right wheel */
+            TB3CCR3 = PID_BASE_SPEED;    /* L_FORWARD – full left wheel  */
+        } else {
+            /* CORRECTION_LEFT or CORRECTION_NONE -> steer left */
+            TB3CCR2 = PID_BASE_SPEED;    /* R_FORWARD – full right wheel */
+            LEFT_REVERSE_SPEED = PID_MIN_SPEED;     /* L_FORWARD – slow left wheel  */
+        }
+    }
 }
 
 /*==============================================================================
@@ -426,12 +468,7 @@ void main(void){
 
     MOTORS_STOP_ALL();
     IR_LED_control(IR_LED_ON);
-    PID_Init(&g_pid);
-
-    set_line(DISP_STATE_LINE, "PROJECT 7 ");
-    set_line(DISP_RIGHT_LINE, "Calibrate ");
-    set_line(DISP_LEFT_LINE,  "SW1=start ");
-    set_line(DISP_TIMER_LINE, "T:  0.0s  ");
+    g_last_correction = CORRECTION_NONE;
 
     /*==========================================================================
      * Main loop
@@ -444,8 +481,7 @@ void main(void){
          * The CCR0 ISR increments update_display_count every 200 ms.
          * We consume one count here and set update_display = TRUE so that
          * Display_Process() (called immediately after) actually triggers an
-         * LCD write.  Previously Display_Process() was called BEFORE the tick
-         * block so it always saw update_display = FALSE and never updated.
+         * LCD write.
          *
          * tick_200ms gates state_timer increments so timers only advance on
          * real 200 ms boundaries rather than every CPU cycle.
@@ -486,7 +522,7 @@ void main(void){
             case STATE_CALIBRATE:
                 run_calibration();
 
-                /* Display computed threshold on line 1 */
+                /* Display computed threshold on line 3 */
                 HEX_to_BCD(g_threshold);
                 display_line[DISP_TIMER_LINE][0] = 'T';
                 display_line[DISP_TIMER_LINE][1] = 'H';
@@ -508,9 +544,7 @@ void main(void){
 
                 /*--------------------------------------------------------------
                  * Discard any SW1 press that occurred during the blocking
-                 * calibration countdown.  Without this, a button press during
-                 * the 4-second "move car to black" window leaves sw1_pressed=TRUE
-                 * and the car launches the instant STATE_IDLE is reached.
+                 * calibration countdown so the car does not auto-launch.
                  *------------------------------------------------------------*/
                 sw1_pressed = FALSE;
 
@@ -519,18 +553,12 @@ void main(void){
 
             /*-- IDLE --------------------------------------------------------*/
             case STATE_IDLE:
-                /*--------------------------------------------------------------
-                 * Every 200 ms tick: update detector readings and status line.
-                 * Line 0 shows DAC ramp progress so user knows when to press.
-                 * Line 3 shows the computed threshold for verification.
-                 *------------------------------------------------------------*/
                 if(tick_200ms){
                     show_detector_values();
 
                     if(DAC_ready == FALSE){
                         set_line(DISP_STATE_LINE, "DAC RAMP  ");
                         set_line(DISP_TIMER_LINE, "Wait...   ");
-                        /* Discard presses during ramp - car cannot move yet  */
                         sw1_pressed = FALSE;
                     } else {
                         set_line(DISP_STATE_LINE, "SW1 GO!   ");
@@ -550,33 +578,28 @@ void main(void){
                     }
                 }
 
-                /*--------------------------------------------------------------
-                 * Button check every loop pass (not tick-gated).
-                 * Only accept the press once DAC_ready is TRUE - the motor
-                 * supply must be at operating voltage before driving.
-                 *------------------------------------------------------------*/
                 if(sw1_pressed && (DAC_ready == TRUE)){
-                    sw1_pressed    = FALSE;
-                    g_timer_ticks  = RESET_STATE;
-                    g_timer_active = FALSE;
-                    state_timer    = RESET_STATE;
-                    PID_Init(&g_pid);
+                    sw1_pressed       = FALSE;
+                    g_timer_ticks     = RESET_STATE;
+                    g_timer_active    = FALSE;
+                    state_timer       = RESET_STATE;
+                    g_last_correction = CORRECTION_NONE;   /* reset bang-bang memory */
                     state = STATE_DELAY;
                     set_line(DISP_STATE_LINE, "WAITING   ");
                     set_line(DISP_TIMER_LINE, "T:  0.0s  ");
                 }
                 break;
 
-            /*-- DELAY: 1 s pause then drive forward with GPIO ---------------*/
+            /*-- DELAY: 1 s pause then start PWM forward ---------------------*/
             case STATE_DELAY:
                 if(tick_200ms){ state_timer++; }
                 if(state_timer >= TICKS_1_SEC){
                     state_timer    = RESET_STATE;
                     g_timer_active = TRUE;
                     IR_LED_control(IR_LED_ON);
-                    DAC_Set(DAC_CRUISE);        /*  controlled speed   */
-                    TB3CCR2 = PID_BASE_SPEED;   /* R_FORWARD */
-                    TB3CCR3 = PID_BASE_SPEED;   /* L_FORWARD */
+                    DAC_Set(DAC_CRUISE);        /* controlled speed            */
+                    TB3CCR2 = PID_BASE_SPEED;   /* R_FORWARD                  */
+                    TB3CCR3 = PID_BASE_SPEED;   /* L_FORWARD                  */
                     TB3CCR4 = WHEEL_OFF;
                     TB3CCR5 = WHEEL_OFF;
                     state = STATE_INTERCEPT;
@@ -584,7 +607,7 @@ void main(void){
                 }
                 break;
 
-            /*-- INTERCEPT: GPIO forward until line detected -----------------*/
+            /*-- INTERCEPT: drive forward until line detected ----------------*/
             case STATE_INTERCEPT:
                 if(get_line_state_dyn() != LINE_NONE){
                     MOTORS_STOP_ALL();
@@ -600,8 +623,8 @@ void main(void){
                 if(state_timer >= TICKS_4_SEC){
                     state_timer = RESET_STATE;
                     state       = STATE_ALIGN;
-                    /* Left turn: right wheel forward, left wheel reverse */
-                    TB3CCR2 = PID_MIN_SPEED;   /* R_FORWARD */
+                    /* Left pivot turn: right forward, left reverse */
+                    TB3CCR2 = WHEEL_OFF;
                     TB3CCR3 = WHEEL_OFF;
                     TB3CCR4 = WHEEL_OFF;
                     TB3CCR5 = PID_MIN_SPEED;   /* L_REVERSE */
@@ -613,13 +636,13 @@ void main(void){
             case STATE_ALIGN:
                 if(get_line_state_dyn() == LINE_BOTH){
                     MOTORS_STOP_GPIO();
-                    PID_Init(&g_pid);
+                    g_last_correction  = CORRECTION_NONE;   /* fresh start    */
                     g_lap_edges        = RESET_STATE;
                     g_prev_right_black = is_black_right_dyn();
                     state_timer        = RESET_STATE;
                     state              = STATE_CIRCLE;
                     set_line(DISP_STATE_LINE, "CIRCLING  ");
-                    line_follow_pid();          /* First PID step immediately  */
+                    line_follow_bangbang();     /* First bang-bang step        */
                 } else {
                     if(tick_200ms){ state_timer++; }
                     if(state_timer >= TICKS_ALIGN_TIMEOUT){
@@ -631,52 +654,40 @@ void main(void){
                 }
                 break;
 
-            /*-- CIRCLE: PID differential steering, count 2 laps -------------*/
+            /*-- CIRCLE: bang-bang steering, count 2 laps --------------------*/
             case STATE_CIRCLE:
-                line_follow_pid();
-
-                /* Rising edge on right detector = one lap-count event        */
-                {
-                    unsigned char cur_right = is_black_right_dyn();
-                    if((cur_right == TRUE) && (g_prev_right_black == FALSE)){
-                        g_lap_edges++;
-                    }
-                    g_prev_right_black = cur_right;
-                }
-
-//                if(g_lap_edges >= LAP_EDGE_COUNT){
-//                    MOTORS_STOP_ALL();
-//                    state_timer = RESET_STATE;
-//                    state       = STATE_EXIT;
-//                    /* Inward exit turn: left forward, right reverse */
-//                    TB3CCR2 = WHEEL_OFF;
-//                    TB3CCR3 = PID_BASE_SPEED;   /* L_FORWARD */
-//                    TB3CCR4 = PID_BASE_SPEED;   /* R_REVERSE */
-//                    TB3CCR5 = WHEEL_OFF;
-//                    set_line(DISP_STATE_LINE, "EXITING   ");
-//                }
+                if(tick_200ms){ state_timer++; }
+                line_follow_bangbang();
+                if(state_timer >= 120){
+                    MOTORS_STOP_ALL();
+                    state       = STATE_EXIT;
+                    state_timer  = RESET_STATE;
+                    TB3CCR2 = 30000;
+                    TB3CCR3 = WHEEL_OFF;
+                    TB3CCR4 = WHEEL_OFF;
+                    TB3CCR5 = 30000;
+                    set_line(DISP_STATE_LINE, "EXITING   ");
+               }
                 break;
-            /*-- EXIT: inward turn then drive to center ---------------------------------*/
+
+            /*-- EXIT: inward turn then drive to center ----------------------*/
             case STATE_EXIT:
                 if(tick_200ms){ state_timer++; }
 
                 if(g_exit_phase == 0u){
-                    /* Phase 0: inward turn for TICKS_TURN duration */
                     if(state_timer >= TICKS_TURN){
-                        state_timer = RESET_STATE;
+                        state_timer  = RESET_STATE;
                         g_exit_phase = 1u;
-                        /* Stop turn, drive straight forward */
                         TB3CCR2 = PID_BASE_SPEED;   /* R_FORWARD */
                         TB3CCR3 = PID_BASE_SPEED;   /* L_FORWARD */
                         TB3CCR4 = WHEEL_OFF;
                         TB3CCR5 = WHEEL_OFF;
                     }
                 } else {
-                    /* Phase 1: drive straight to center for TICKS_EXIT_DRIVE duration */
                     if(state_timer >= TICKS_EXIT_DRIVE){
                         MOTORS_STOP_ALL();
                         g_timer_active = FALSE;
-                        g_exit_phase   = RESET_STATE;   /* reset for next run */
+                        g_exit_phase   = RESET_STATE;
                         state = STATE_STOPPED;
                         set_line(DISP_STATE_LINE, "STOPPED   ");
                         show_detector_values();
@@ -693,14 +704,9 @@ void main(void){
 
                 if(tick_200ms){ show_detector_values(); }
 
-                /*--------------------------------------------------------------
-                 * Poll sw1_pressed every loop pass (not tick-gated).
-                 * Clear it unconditionally first so that any bounce or extra
-                 * press during the stopping sequence doesn't auto-restart.
-                 *------------------------------------------------------------*/
                 if(sw1_pressed){
-                    sw1_pressed = FALSE;   /* always consume the flag          */
-                    P2OUT |= DAC_ENB;      /* Re-enable converter for next run  */
+                    sw1_pressed = FALSE;
+                    P2OUT |= DAC_ENB;
                     state = STATE_CALIBRATE;
                 }
                 break;

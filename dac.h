@@ -57,8 +57,8 @@
  * These are kept here (not macros.h) because they are tightly coupled to the
  * DAC voltage level.  If DAC_CRUISE changes, re-evaluate PID_BASE_SPEED.
  *------------------------------------------------------------------------------*/
-#define PID_BASE_SPEED          (20000u)  /* TB3CCR duty at straight-ahead       */
-#define PID_MIN_SPEED           (12000u)  /* minimum CCR – keep wheels turning   */
+#define PID_BASE_SPEED          (50000u)  /* TB3CCR duty at straight-ahead       */
+#define PID_MIN_SPEED           (10000u)  /* minimum CCR – keep wheels turning   */
 #define PID_MAX_SPEED           (50000u) /* maximum CCR – below WHEEL_PERIOD    */
 
 /*------------------------------------------------------------------------------
