@@ -159,53 +159,52 @@ __interrupt void ADC_ISR(void){
         case ADCIV_ADCINIFG:         /* Window comparator – in-window             */
             break;
 
-        case ADCIV_ADCIFG:           /* ADCMEM0 has a valid conversion result     */
-
-            ADCCTL0 &= ~ADCENC;      /* Disable conversions before changing mux  */
-
-            switch(ADC_Channel++){
-
-                /*--------------------------------------------------------------
-                 * Pass 0: result is from A2 (V_DETECT_L)
-                 *         Switch mux to A3 (V_DETECT_R) for next pass.
-                 *------------------------------------------------------------*/
-                case ADC_CHANNEL_L_DETECT:
-                    ADC_Left_Detect  = ADCMEM0 >> ADC_SCALE_SHIFT;
-                    ADCMCTL0 &= ~ADCINCH_2;   /* Clear A2 channel bits          */
-                    ADCMCTL0 |=  ADCINCH_3;   /* Select A3 = V_DETECT_R         */
-                    break;
-
-                /*--------------------------------------------------------------
-                 * Pass 1: result is from A3 (V_DETECT_R)
-                 *         Switch mux to A5 (V_THUMB) for next pass.
-                 *------------------------------------------------------------*/
-                case ADC_CHANNEL_R_DETECT:
-                    ADC_Right_Detect = ADCMEM0 >> ADC_SCALE_SHIFT;
-                    ADCMCTL0 &= ~ADCINCH_3;   /* Clear A3 channel bits          */
-                    ADCMCTL0 |=  ADCINCH_5;   /* Select A5 = V_THUMB            */
-                    break;
-
-                /*--------------------------------------------------------------
-                 * Pass 2: result is from A5 (V_THUMB)
-                 *         Reset mux to A2 for next round-robin cycle.
-                 *         Signal foreground that a complete set is ready.
-                 *------------------------------------------------------------*/
-                case ADC_CHANNEL_THUMB:
-                    ADC_Thumb        = ADCMEM0 >> ADC_SCALE_SHIFT;
-                    ADCMCTL0 &= ~ADCINCH_5;   /* Clear A5 channel bits          */
-                    ADCMCTL0 |=  ADCINCH_2;   /* Return to A2 = V_DETECT_L      */
-                    ADC_Channel      = RESET_STATE;   /* Reset round-robin index */
-                    ADC_updated      = TRUE;          /* Notify foreground       */
-                    break;
-
-                default:
-                    ADC_Channel = RESET_STATE;
-                    break;
-            }
-
-            ADCCTL0 |= ADCENC;       /* Re-enable conversions                   */
-            ADCCTL0 |= ADCSC;        /* Start next conversion                   */
-            break;
+//        case ADCIV_ADCIFG:           /* ADCMEM0 has a valid conversion result     */
+//            ADCCTL0 &= ~ADCENC;      /* Disable conversions before changing mux  */
+//
+//            switch(ADC_Channel++){
+//
+//                /*--------------------------------------------------------------
+//                 * Pass 0: result is from A2 (V_DETECT_L)
+//                 *         Switch mux to A3 (V_DETECT_R) for next pass.
+//                 *------------------------------------------------------------*/
+//                case ADC_CHANNEL_L_DETECT:
+//                    ADC_Left_Detect  = ADCMEM0 >> ADC_SCALE_SHIFT;
+//                    ADCMCTL0 &= ~ADCINCH_2;   /* Clear A2 channel bits          */
+//                    ADCMCTL0 |=  ADCINCH_3;   /* Select A3 = V_DETECT_R         */
+//                    break;
+//
+//                /*--------------------------------------------------------------
+//                 * Pass 1: result is from A3 (V_DETECT_R)
+//                 *         Switch mux to A5 (V_THUMB) for next pass.
+//                 *------------------------------------------------------------*/
+//                case ADC_CHANNEL_R_DETECT:
+//                    ADC_Right_Detect = ADCMEM0 >> ADC_SCALE_SHIFT;
+//                    ADCMCTL0 &= ~ADCINCH_3;   /* Clear A3 channel bits          */
+//                    ADCMCTL0 |=  ADCINCH_5;   /* Select A5 = V_THUMB            */
+//                    break;
+//
+//                /*--------------------------------------------------------------
+//                 * Pass 2: result is from A5 (V_THUMB)
+//                 *         Reset mux to A2 for next round-robin cycle.
+//                 *         Signal foreground that a complete set is ready.
+//                 *------------------------------------------------------------*/
+//                case ADC_CHANNEL_THUMB:
+//                    ADC_Thumb        = ADCMEM0 >> ADC_SCALE_SHIFT;
+//                    ADCMCTL0 &= ~ADCINCH_5;   /* Clear A5 channel bits          */
+//                    ADCMCTL0 |=  ADCINCH_2;   /* Return to A2 = V_DETECT_L      */
+//                    ADC_Channel      = RESET_STATE;   /* Reset round-robin index */
+//                    ADC_updated      = TRUE;          /* Notify foreground       */
+//                    break;
+//
+//                default:
+//                    ADC_Channel = RESET_STATE;
+//                    break;
+//            }
+//
+//            ADCCTL0 |= ADCENC;       /* Re-enable conversions                   */
+//            ADCCTL0 |= ADCSC;        /* Start next conversion                   */
+//            break;
 
         default:
             break;

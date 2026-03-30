@@ -1,6 +1,10 @@
-//------------------------------------------------------------------------------
-// init.c  –  System Initialization
-//------------------------------------------------------------------------------
+/*------------------------------------------------------------------------------
+ * File:        init.c  (Homework 8)
+ * Target:      MSP430FR2355
+ *
+ * Description: System initialization – clears display buffers, sets up
+ *              display pointers, clears switch flags, enables interrupts.
+ *------------------------------------------------------------------------------*/
 
 #include "functions.h"
 #include "LCD.h"
@@ -20,31 +24,31 @@ extern volatile unsigned char sw2_pressed;
 void Init_Conditions(void){
     int i;
 
-    // Clear all display buffers
+    /* Clear all display buffers */
     for(i = 0; i < 11; i++){
         display_line[0][i] = RESET_STATE;
         display_line[1][i] = RESET_STATE;
         display_line[2][i] = RESET_STATE;
         display_line[3][i] = RESET_STATE;
     }
-    // Null-terminate each line
     display_line[0][10] = 0;
     display_line[1][10] = 0;
     display_line[2][10] = 0;
     display_line[3][10] = 0;
 
-    // Point display pointers at the line buffers
+    /* Point display pointers at line buffers */
     display[0] = &display_line[0][0];
     display[1] = &display_line[1][0];
     display[2] = &display_line[2][0];
     display[3] = &display_line[3][0];
 
-    update_display = 0;
+    update_display       = 0;
+    update_display_count = 0;
 
-    // Switch flags
-    sw1_pressed = 0;
-    sw2_pressed = 0;
+    /* Switch flags */
+    sw1_pressed = FALSE;
+    sw2_pressed = FALSE;
 
-    // Enable global interrupts
+    /* Enable global interrupts */
     enable_interrupts();
 }
