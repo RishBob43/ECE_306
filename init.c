@@ -1,9 +1,9 @@
 /*------------------------------------------------------------------------------
- * File:        init.c  (Homework 8)
+ * File:        init.c  (Project 8)
  * Target:      MSP430FR2355
  *
- * Description: System initialization – clears display buffers, sets up
- *              display pointers, clears switch flags, enables interrupts.
+ * Description: System initialization – clears display buffers, sets pointers,
+ *              clears all flags, enables global interrupts.
  *------------------------------------------------------------------------------*/
 
 #include "functions.h"
@@ -24,30 +24,28 @@ extern volatile unsigned char sw2_pressed;
 void Init_Conditions(void){
     int i;
 
-    /* Clear all display buffers */
+    /* Clear all four 11-byte display line buffers */
     for(i = 0; i < 11; i++){
         display_line[0][i] = RESET_STATE;
         display_line[1][i] = RESET_STATE;
         display_line[2][i] = RESET_STATE;
         display_line[3][i] = RESET_STATE;
     }
-    display_line[0][10] = 0;
-    display_line[1][10] = 0;
-    display_line[2][10] = 0;
-    display_line[3][10] = 0;
 
-    /* Point display pointers at line buffers */
+    /* Point display[] pointers at the line buffers */
     display[0] = &display_line[0][0];
     display[1] = &display_line[1][0];
     display[2] = &display_line[2][0];
     display[3] = &display_line[3][0];
 
-    update_display       = 0;
-    update_display_count = 0;
-
-    /* Switch flags */
-    sw1_pressed = FALSE;
-    sw2_pressed = FALSE;
+    /* Clear all flags and counters */
+    update_display       = FALSE;
+    update_display_count = RESET_STATE;
+    display_changed      = FALSE;
+    sw1_pressed          = FALSE;
+    sw2_pressed          = FALSE;
+    Time_Sequence        = RESET_STATE;
+    one_time             = RESET_STATE;
 
     /* Enable global interrupts */
     enable_interrupts();

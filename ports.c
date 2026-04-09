@@ -258,7 +258,7 @@ void Init_Port3(char smclk){
     P3SEL0 &= ~IOT_EN_CPU;
     P3SEL1 &= ~IOT_EN_CPU;
     P3OUT  &= ~IOT_EN_CPU;
-    P3DIR  &= ~IOT_EN_CPU;
+    P3DIR |= IOT_EN_CPU;
 }
 
 /*------------------------------------------------------------------------------
@@ -364,17 +364,12 @@ void Init_Port5(void){
 
 
 /*------------------------------------------------------------------------------
- * Init_Port6
- * Description: Configures Port 6 pins.
- *   P6.0  LCD_BACKLITE - GPIO output, init HIGH (backlight on at startup)
- *   P6.1  R_FORWARD    - Timer B3.2 PWM output
- *   P6.2  L_FORWARD    - Timer B3.3 PWM output
- *   P6.3  R_REVERSE    - Timer B3.4 PWM output
- *   P6.4  L_REVERSE    - Timer B3.5 PWM output
- *   P6.5  P6_5         - unused, GPIO input
- *   P6.6  GRN_LED      - GPIO output, init low
- * Globals used:  none
- * Locals used:   none
+ *
+ * Change from Project 8:
+ *   P6.1-P6.4 (R_FORWARD, L_FORWARD, R_REVERSE, L_REVERSE) are now plain
+ *   GPIO outputs instead of timer PWM outputs.
+ *   P6SEL0 is CLEARED (not set) for these pins so the MSP430 drives them
+ *   directly with P6OUT rather than routing them to TB3.
  *------------------------------------------------------------------------------*/
 void Init_Port6(void){
     P6OUT = RESET_STATE;
@@ -383,29 +378,29 @@ void Init_Port6(void){
     /* P6.0  LCD_BACKLITE – output, start HIGH (backlight on) */
     P6SEL0 &= ~LCD_BACKLITE;
     P6SEL1 &= ~LCD_BACKLITE;
-    P6OUT  |=  LCD_BACKLITE;  /* Initial state: backlight ON                   */
+    P6OUT  |=  LCD_BACKLITE;
     P6DIR  |=  LCD_BACKLITE;
 
-    /* P6.1  R_FORWARD – GPIO output */
-    P6SEL0 |= R_FORWARD;   // was: P6SEL0 |= R_FORWARD
+    /* P6.1  R_FORWARD – GPIO output, init LOW (motor off) */
+    P6SEL0 &= ~R_FORWARD;      /* Clear SEL0: GPIO mode (was |= in P8)        */
     P6SEL1 &= ~R_FORWARD;
     P6OUT  &= ~R_FORWARD;
     P6DIR  |=  R_FORWARD;
 
-    /* P6.2  L_FORWARD – GPIO output */
-    P6SEL0 |= L_FORWARD;   // was: P6SEL0 |= L_FORWARD
+    /* P6.2  L_FORWARD – GPIO output, init LOW */
+    P6SEL0 &= ~L_FORWARD;
     P6SEL1 &= ~L_FORWARD;
     P6OUT  &= ~L_FORWARD;
     P6DIR  |=  L_FORWARD;
 
-    /* P6.3  R_REVERSE – GPIO output */
-    P6SEL0 |= R_REVERSE;   // was: P6SEL0 |= R_REVERSE
+    /* P6.3  R_REVERSE – GPIO output, init LOW */
+    P6SEL0 &= ~R_REVERSE;
     P6SEL1 &= ~R_REVERSE;
     P6OUT  &= ~R_REVERSE;
     P6DIR  |=  R_REVERSE;
 
-    /* P6.4  L_REVERSE – GPIO output */
-    P6SEL0 |= L_REVERSE;   // was: P6SEL0 |= L_REVERSE
+    /* P6.4  L_REVERSE – GPIO output, init LOW */
+    P6SEL0 &= ~L_REVERSE;
     P6SEL1 &= ~L_REVERSE;
     P6OUT  &= ~L_REVERSE;
     P6DIR  |=  L_REVERSE;
