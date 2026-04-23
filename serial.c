@@ -2,28 +2,23 @@
  * File:        serial.c
  * Target:      MSP430FR2355
  *
- * Description: eUSCI_A0 (IOT/J9) and eUSCI_A1 (PC/J14) UART bridge.
+ * Description: eUSCI_A0 (IOT/J9) and eUSCI_A1 (PC/J14) UART.
  *
- *              Project 9 data path:
+ *              Data path:
+ *                PC  -> UCA1 RX ISR -> UCA0TXBUF (passthrough, if not ^ cmd)
+ *                IOT -> UCA0 RX ISR -> UCA1TXBUF (forward to PC if pc_ready)
  *
- *                PC → UCA1 RX ISR → PC_2_IOT[] → UCA0 TX ISR → IOT
- *                IOT → UCA0 RX ISR → IOT_2_PC[] → UCA1 TX ISR → PC
+ *              UCA0 ISR collects one line at a time into iot_rx_msg[].
+ *              When \r is received iot_msg_ready is set and RX interrupt
+ *              is disabled until main clears it and re-enables.
  *
- *              Gate:
- *                pc_tx_enabled starts FALSE.  The first character received
- *                on UCA1 sets it TRUE and opens the PC transmit path.
+ *              UCA1 ISR detects ^ prefix: characters after ^ go into
+ *              fram_cmd_buf[] and are NOT forwarded to the IOT.
+ *              fram_cmd_ready is set after the first non-^ character
+ *              (single-char commands: F, S, ^, etc.).
  *
- *              ^ command parser:
- *                Characters arriving on UCA1 that start with '^' are FRAM
- *                commands and are NOT forwarded to the IOT.  They are
- *                accumulated in cmd_buf[] until 0x0D (CR) is received, at
- *                which point cmd_ready is set for the foreground to act on.
- *
- *              TX interrupt pattern  (matches IOT code skeleton):
- *                RX ISR stores char in ring buffer, then enables the TX
- *                interrupt on the other UART.
- *                TX ISR drains the ring buffer one char at a time, then
- *                disables itself when the buffer is empty.
+ *              Init_IOT() drives the hardware reset sequence and sends
+ *              the three power-on AT commands to the IOT module.
  *------------------------------------------------------------------------------*/
 
 #include "msp430.h"
@@ -33,39 +28,42 @@
 #include <string.h>
 
 /*------------------------------------------------------------------------------
- * IOT bridge ring buffers
+ * Ring buffers
  *------------------------------------------------------------------------------*/
-volatile unsigned char IOT_2_PC[SMALL_RING_SIZE];
-volatile unsigned int  iot_rx_wr  = BEGINNING;
-         unsigned int  iot_rx_rd  = BEGINNING;
-         unsigned int  direct_iot = BEGINNING;
+volatile unsigned int  uca0_rx_wr = SERIAL_BEGINNING;
+volatile unsigned int  uca0_rx_rd = SERIAL_BEGINNING;
+volatile char          UCA0_Char_Rx[SERIAL_RING_SIZE];
 
-volatile unsigned char PC_2_IOT[SMALL_RING_SIZE];
-volatile unsigned int  usb_rx_wr  = BEGINNING;
-         unsigned int  usb_rx_rd  = BEGINNING;
-         unsigned int  direct_usb = BEGINNING;
+volatile unsigned int  uca1_rx_wr = SERIAL_BEGINNING;
+volatile unsigned int  uca1_rx_rd = SERIAL_BEGINNING;
+volatile char          UCA1_Char_Rx[SERIAL_RING_SIZE];
 
 /*------------------------------------------------------------------------------
- * PC TX gate and ^ command state
+ * IOT message buffer  (one AT response line, CR-terminated)
  *------------------------------------------------------------------------------*/
-volatile unsigned char pc_tx_enabled = FALSE;
-
-volatile unsigned char cmd_active = FALSE;
-volatile unsigned char cmd_buf[CMD_BUF_SIZE];
-volatile unsigned int  cmd_len    = 0u;
-volatile unsigned char cmd_ready  = FALSE;
+volatile char          iot_rx_msg[IOT_MSG_SIZE];
+volatile unsigned char iot_msg_ready  = FALSE;
+volatile unsigned int  iot_rx_count   = 0u;
 
 /*------------------------------------------------------------------------------
- * Legacy display buffer (LCD line 0 passthrough view)
+ * PC ready flag and FRAM ^ command parser state
+ *------------------------------------------------------------------------------*/
+volatile unsigned char pc_ready       = FALSE;
+volatile unsigned char fram_cmd_active = FALSE;
+volatile unsigned char fram_cmd_ready  = FALSE;
+volatile unsigned int  fram_cmd_count  = 0u;
+volatile char          fram_cmd_buf[FRAM_CMD_BUF_SIZE];
+
+/*------------------------------------------------------------------------------
+ * LCD rolling display buffer
  *------------------------------------------------------------------------------*/
 volatile char          rx_display_buf[RX_DISPLAY_LEN + 1u] = "          ";
 volatile unsigned char rx_display_updated = FALSE;
 
 /*------------------------------------------------------------------------------
- * Baud tracking
+ * Current baud
  *------------------------------------------------------------------------------*/
 volatile unsigned char current_baud = BAUD_115200;
-volatile unsigned char iot_baud     = BAUD_115200;
 
 /*==============================================================================
  * apply_baud_registers  (internal)
@@ -83,7 +81,7 @@ static void apply_baud_registers(unsigned char baud,
             *pBRW  = BR_9600_UCBRx;
             *pMCTL = BR_9600_MCTLW;
             break;
-        default:  /* BAUD_115200 */
+        default:   /* BAUD_115200 */
             *pBRW  = BR_115200_UCBRx;
             *pMCTL = BR_115200_MCTLW;
             break;
@@ -91,46 +89,37 @@ static void apply_baud_registers(unsigned char baud,
 }
 
 /*==============================================================================
- * Init_Serial_UCA0   (IOT side)
+ * Init_Serial_UCA0  (IOT side, J9)
  *==============================================================================*/
 void Init_Serial_UCA0(unsigned char baud){
     unsigned int i;
-
-    for(i = BEGINNING; i < SMALL_RING_SIZE; i++){
-        IOT_2_PC[i] = 0x00u;
-        PC_2_IOT[i] = 0x00u;
+    for(i = SERIAL_BEGINNING; i < SERIAL_RING_SIZE; i++){
+        UCA0_Char_Rx[i] = 0x00;
     }
-    iot_rx_wr  = BEGINNING;
-    iot_rx_rd  = BEGINNING;
-    direct_iot = BEGINNING;
-    usb_rx_wr  = BEGINNING;
-    usb_rx_rd  = BEGINNING;
-    direct_usb = BEGINNING;
-
-    iot_baud = baud;
+    uca0_rx_wr    = SERIAL_BEGINNING;
+    uca0_rx_rd    = SERIAL_BEGINNING;
+    iot_rx_count  = 0u;
+    iot_msg_ready = FALSE;
 
     UCA0CTLW0  = RESET_STATE;
     UCA0CTLW0 |= UCSWRST;
     UCA0CTLW0 |= UCSSEL__SMCLK;
-
     apply_baud_registers(baud, &UCA0BRW, &UCA0MCTLW);
-
     UCA0CTLW0 &= ~UCSWRST;
-    UCA0IE    |=  UCRXIE;    /* Enable RX; TX interrupt enabled on demand     */
+    UCA0IE    |=  UCRXIE;
 }
 
 /*==============================================================================
- * Init_Serial_UCA1   (PC backdoor)
+ * Init_Serial_UCA1  (PC backdoor, J14)
  *==============================================================================*/
 void Init_Serial_UCA1(unsigned char baud){
     unsigned int i;
-
-    current_baud     = baud;
-    pc_tx_enabled    = FALSE;   /* Gate: wait for first PC char               */
-
-    cmd_active       = FALSE;
-    cmd_len          = 0u;
-    cmd_ready        = FALSE;
+    for(i = SERIAL_BEGINNING; i < SERIAL_RING_SIZE; i++){
+        UCA1_Char_Rx[i] = 0x00;
+    }
+    uca1_rx_wr = SERIAL_BEGINNING;
+    uca1_rx_rd = SERIAL_BEGINNING;
+    current_baud = baud;
 
     for(i = 0u; i < RX_DISPLAY_LEN; i++){
         rx_display_buf[i] = ' ';
@@ -138,21 +127,23 @@ void Init_Serial_UCA1(unsigned char baud){
     rx_display_buf[RX_DISPLAY_LEN] = '\0';
     rx_display_updated = FALSE;
 
+    pc_ready       = FALSE;
+    fram_cmd_active = FALSE;
+    fram_cmd_ready  = FALSE;
+    fram_cmd_count  = 0u;
+
     UCA1CTLW0  = RESET_STATE;
     UCA1CTLW0 |= UCSWRST;
     UCA1CTLW0 |= UCSSEL__SMCLK;
-
     apply_baud_registers(baud, &UCA1BRW, &UCA1MCTLW);
-
     UCA1CTLW0 &= ~UCSWRST;
     UCA1IE    |=  UCRXIE;
 }
 
 /*==============================================================================
- * Set_Baud_UCA0  (runtime baud change for IOT port)
+ * Set_Baud_UCA0
  *==============================================================================*/
 void Set_Baud_UCA0(unsigned char baud){
-    iot_baud = baud;
     UCA0CTLW0 |=  UCSWRST;
     apply_baud_registers(baud, &UCA0BRW, &UCA0MCTLW);
     UCA0CTLW0 &= ~UCSWRST;
@@ -160,18 +151,16 @@ void Set_Baud_UCA0(unsigned char baud){
 }
 
 /*==============================================================================
- * Set_Baud_UCA1  (runtime baud change for PC port)
+ * Set_Baud_UCA1
  *==============================================================================*/
 void Set_Baud_UCA1(unsigned char baud){
     unsigned int i;
     current_baud = baud;
-
     for(i = 0u; i < RX_DISPLAY_LEN; i++){
         rx_display_buf[i] = ' ';
     }
     rx_display_buf[RX_DISPLAY_LEN] = '\0';
     rx_display_updated = TRUE;
-
     UCA1CTLW0 |=  UCSWRST;
     apply_baud_registers(baud, &UCA1BRW, &UCA1MCTLW);
     UCA1CTLW0 &= ~UCSWRST;
@@ -179,12 +168,10 @@ void Set_Baud_UCA1(unsigned char baud){
 }
 
 /*==============================================================================
- * UCA1_Transmit_String  (blocking, foreground, to PC)
- *   Respects the pc_tx_enabled gate.
+ * UCA1_Transmit_String  (blocking, foreground -> PC)
  *==============================================================================*/
 void UCA1_Transmit_String(const char *str, unsigned int len){
     unsigned int i;
-    if(!pc_tx_enabled){ return; }
     for(i = 0u; i < len; i++){
         while(!(UCA1IFG & UCTXIFG));
         UCA1TXBUF = (unsigned char)str[i];
@@ -192,7 +179,7 @@ void UCA1_Transmit_String(const char *str, unsigned int len){
 }
 
 /*==============================================================================
- * UCA0_Transmit_String  (blocking, foreground, to IOT)
+ * UCA0_Transmit_String  (blocking, foreground -> IOT)
  *==============================================================================*/
 void UCA0_Transmit_String(const char *str, unsigned int len){
     unsigned int i;
@@ -203,69 +190,101 @@ void UCA0_Transmit_String(const char *str, unsigned int len){
 }
 
 /*==============================================================================
- * IOT_Send_Command
- *   Transmits a null-terminated command string to the IOT, appending CR+LF.
- *   Always use this when sending AT commands from FRAM code.
+ * Init_IOT
+ *
+ * Hardware reset sequence + power-on AT commands.
+ * Matches the provided reference implementation.
+ * Call after Init_Serial_UCA0() and Init_Serial_UCA1().
  *==============================================================================*/
-void IOT_Send_Command(const char *cmd, unsigned int len){
-    UCA0_Transmit_String(cmd, len);
-    /* Append CR then LF */
-    while(!(UCA0IFG & UCTXIFG)); UCA0TXBUF = 0x0Du;
-    while(!(UCA0IFG & UCTXIFG)); UCA0TXBUF = 0x0Au;
+// In serial.c
+void Init_IOT(void){
+    P6OUT |= GRN_LED;
+
+    // Hardware Reset Pulse
+    P3OUT &= ~IOT_EN_CPU;
+    __delay_cycles(800000u);
+    P3OUT |=  IOT_EN_CPU;
+
+    pc_ready = TRUE;
+    __delay_cycles(8000000u); // 1s settle
+
+    // Basic Config
+    UCA0_Transmit_String("AT+SYSSTORE=0\r\n", 15u);
+    __delay_cycles(4000000u); // 0.5s
+
+    UCA0_Transmit_String("AT+CIPMUX=1\r\n", 13u);
+    __delay_cycles(4000000u);
+
+    UCA0_Transmit_String("AT+CIPSERVER=1,6767\r\n", 21u);
+    __delay_cycles(4000000u);
+
+    P6OUT &= ~GRN_LED;
 }
 
 /*==============================================================================
- * IOT_Reset
- *   Drives P3.7 (IOT_EN) LOW for IOT_RESET_MS then releases it HIGH.
- *   Call after Init_Ports() and before issuing any AT commands.
- *==============================================================================*/
-void IOT_Reset(void){
-    P3OUT &= ~IOT_EN_CPU;            /* Assert reset (active LOW)              */
-    __delay_cycles(8000u * IOT_RESET_MS);   /* 150 ms @ 8 MHz                 */
-    P3OUT |=  IOT_EN_CPU;            /* Release reset                          */
-    __delay_cycles(8000u * IOT_SETTLE_MS);  /* 500 ms settle                  */
-}
-
-/*==============================================================================
- * EUSCI_A0_VECTOR  –  UCA0 ISR  (IOT side)
+ * EUSCI_A1_VECTOR  –  UCA1 ISR  (PC backdoor, J14)
  *
- * Case 2 (RX):
- *   Store received byte in IOT_2_PC ring buffer.
- *   Enable UCA1 TX interrupt so it drains toward PC.
- *
- * Case 4 (TX):
- *   Drain next byte from PC_2_IOT toward IOT.
- *   Disable TX interrupt when buffer empty.
+ * On every received character:
+ *   1. Set pc_ready TRUE (opens IOT->PC forward path).
+ *   2. Store in UCA1 ring buffer.
+ *   3. Update LCD rolling display buffer.
+ *   4a. If '^' detected: start FRAM command, do NOT forward to IOT.
+ *   4b. If FRAM command active: accumulate one char then set fram_cmd_ready.
+ *   4c. Otherwise: passthrough to IOT via UCA0TXBUF.
  *==============================================================================*/
-#pragma vector = EUSCI_A0_VECTOR
-__interrupt void eUSCI_A0_ISR(void){
+#pragma vector = EUSCI_A1_VECTOR
+__interrupt void eUSCI_A1_ISR(void){
     unsigned int temp;
+    char rx_char;
+    unsigned int i;
 
-    switch(__even_in_range(UCA0IV, 0x08)){
+    switch(__even_in_range(UCA1IV, 0x08)){
 
         case 0:
             break;
 
-        case 2:   /* RXIFG – char arrived from IOT                            */
-            temp = iot_rx_wr++;
-            IOT_2_PC[temp] = UCA0RXBUF;
-            if(iot_rx_wr >= SMALL_RING_SIZE){
-                iot_rx_wr = BEGINNING;
+        case 2:   /* RXIFG */
+            rx_char = (char)UCA1RXBUF;
+
+            /* Open PC TX path on first received character */
+            pc_ready = TRUE;
+
+            /* Ring buffer */
+            temp = uca1_rx_wr++;
+            UCA1_Char_Rx[temp] = rx_char;
+            if(uca1_rx_wr >= SERIAL_RING_SIZE){
+                uca1_rx_wr = SERIAL_BEGINNING;
             }
-            /* Forward to PC if gate is open                                  */
-            if(pc_tx_enabled){
-                UCA1IE |= UCTXIE;   /* Let UCA1 TX ISR drain IOT_2_PC         */
+
+            /* Rolling LCD display buffer */
+            for(i = 0u; i < (RX_DISPLAY_LEN - 1u); i++){
+                rx_display_buf[i] = rx_display_buf[i + 1u];
+            }
+            rx_display_buf[RX_DISPLAY_LEN - 1u] = rx_char;
+            rx_display_updated = TRUE;
+
+            /* ^ command detection */
+            if(rx_char == '^'){
+                fram_cmd_active = TRUE;
+                fram_cmd_count  = 0u;
+            } else if(fram_cmd_active){
+                /* Accumulate one character then signal ready */
+                fram_cmd_buf[fram_cmd_count++] = rx_char;
+                if(fram_cmd_count >= 1u){
+                    fram_cmd_buf[fram_cmd_count] = '\0';
+                    fram_cmd_ready  = TRUE;
+                    fram_cmd_active = FALSE;
+                    fram_cmd_count  = 0u;
+                }
+                /* Do NOT forward to IOT */
+            } else {
+                /* Passthrough to IOT */
+                while(!(UCA0IFG & UCTXIFG));
+                UCA0TXBUF = (unsigned char)rx_char;
             }
             break;
 
-        case 4:   /* TXIFG – ready to send next byte to IOT                  */
-            UCA0TXBUF = PC_2_IOT[direct_iot++];
-            if(direct_iot >= SMALL_RING_SIZE){
-                direct_iot = BEGINNING;
-            }
-            if(direct_iot == usb_rx_wr){
-                UCA0IE &= ~UCTXIE;  /* Buffer drained – disable TX interrupt  */
-            }
+        case 4:   /* TXIFG – not used */
             break;
 
         default:
@@ -274,89 +293,46 @@ __interrupt void eUSCI_A0_ISR(void){
 }
 
 /*==============================================================================
- * EUSCI_A1_VECTOR  –  UCA1 ISR  (PC backdoor)
+ * EUSCI_A0_VECTOR  –  UCA0 ISR  (IOT port, J9)
  *
- * Case 2 (RX):
- *   First char received: open the pc_tx_enabled gate.
- *   If char is '^': start command accumulation mode.
- *   If cmd_active: accumulate into cmd_buf until CR; set cmd_ready on CR.
- *     Commands are NOT forwarded to IOT.
- *   Otherwise: store in PC_2_IOT and enable UCA0 TX to forward to IOT.
- *   Update LCD rolling display buffer.
+ * Collects one line from the IOT into iot_rx_msg[]:
+ *   \r  -> null-terminate, set iot_msg_ready, disable RX interrupt
+ *   \n  -> ignore
+ *   printable -> store if room
  *
- * Case 4 (TX):
- *   Drain IOT_2_PC toward PC.
- *   Disable when buffer empty.
+ * Forwards every character to PC (UCA1) if pc_ready is TRUE.
  *==============================================================================*/
-#pragma vector = EUSCI_A1_VECTOR
-__interrupt void eUSCI_A1_ISR(void){
-    unsigned int temp;
-    unsigned char rx_char;
-    unsigned int i;
+#pragma vector = EUSCI_A0_VECTOR
+__interrupt void eUSCI_A0_ISR(void){
+    char rx_char;
 
-    switch(__even_in_range(UCA1IV, 0x08)){
+    switch(__even_in_range(UCA0IV, 0x08)){
 
         case 0:
             break;
 
-        case 2:   /* RXIFG – char arrived from PC                            */
-            rx_char = (unsigned char)UCA1RXBUF;
+        case 2:   /* RXIFG */
+            rx_char = (char)UCA0RXBUF;
 
-            /* Open PC TX gate on first received character                    */
-            if(!pc_tx_enabled){
-                pc_tx_enabled = TRUE;
+            if(rx_char == '\r'){
+                iot_rx_msg[iot_rx_count] = '\0';  /* terminate line           */
+                iot_rx_count  = 0u;
+                iot_msg_ready = TRUE;
+                UCA0IE &= ~UCRXIE;                /* disable until main clears */
+            } else if(rx_char == '\n'){
+                /* ignore LF */
+            } else if(rx_char >= 0x20 && iot_rx_count < (IOT_MSG_SIZE - 1u)){
+                iot_rx_msg[iot_rx_count++] = rx_char;
             }
 
-            /* ---- ^ command parser ---- */
-            if(rx_char == CMD_CHAR){
-                /* Start of a FRAM command sequence                           */
-                cmd_active = TRUE;
-                cmd_len    = 0u;
-                cmd_ready  = FALSE;
-                /* Do NOT forward '^' to IOT                                  */
-                break;
+            /* Forward to PC if ready */
+            if(pc_ready){
+                while(!(UCA1IFG & UCTXIFG));
+                UCA1TXBUF = (unsigned char)rx_char;
             }
-
-            if(cmd_active){
-                if(rx_char == CMD_TERMINATOR){
-                    /* Command complete                                        */
-                    cmd_buf[cmd_len] = '\0';
-                    cmd_active = FALSE;
-                    cmd_ready  = TRUE;
-                    /* Do NOT forward CR to IOT                               */
-                } else {
-                    if(cmd_len < (CMD_BUF_SIZE - 1u)){
-                        cmd_buf[cmd_len++] = rx_char;
-                    }
-                    /* Do NOT forward command chars to IOT                    */
-                }
-                break;
-            }
-
-            /* ---- Normal passthrough: store in PC_2_IOT ---- */
-            temp = usb_rx_wr++;
-            PC_2_IOT[temp] = rx_char;
-            if(usb_rx_wr >= SMALL_RING_SIZE){
-                usb_rx_wr = BEGINNING;
-            }
-            UCA0IE |= UCTXIE;   /* Enable UCA0 TX to drain toward IOT         */
-
-            /* ---- Update LCD rolling display buffer ---- */
-            for(i = 0u; i < (RX_DISPLAY_LEN - 1u); i++){
-                rx_display_buf[i] = rx_display_buf[i + 1u];
-            }
-            rx_display_buf[RX_DISPLAY_LEN - 1u] = (char)rx_char;
-            rx_display_updated = TRUE;
             break;
 
-        case 4:   /* TXIFG – ready to send next byte to PC                  */
-            UCA1TXBUF = IOT_2_PC[direct_usb++];
-            if(direct_usb >= SMALL_RING_SIZE){
-                direct_usb = BEGINNING;
-            }
-            if(direct_usb == iot_rx_wr){
-                UCA1IE &= ~UCTXIE;  /* Buffer drained – disable TX interrupt  */
-            }
+        case 4:
             break;
 
         default:

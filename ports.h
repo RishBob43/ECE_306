@@ -6,10 +6,10 @@
 #define PORTS                  (0x00)
 #define PWM_MODE               (0x01)
 #define WHEEL_PERIOD          (50005)
-#define RIGHT_FORWARD_SPEED (TB3CCR2)
-#define LEFT_FORWARD_SPEED  (TB3CCR3)
-#define RIGHT_REVERSE_SPEED (TB3CCR4)
-#define LEFT_REVERSE_SPEED  (TB3CCR5)
+#define LEFT_FORWARD_SPEED (TB3CCR2)
+#define RIGHT_FORWARD_SPEED  (TB3CCR3)
+#define LEFT_REVERSE_SPEED (TB3CCR4)
+#define RIGHT_REVERSE_SPEED  (TB3CCR5)
 #define STEP                   (2000)
 #define FORWARD                (0x00)
 #define REVERSE                (0x01)
@@ -63,10 +63,10 @@
 
 // Port 6 Pins
 #define LCD_BACKLITE           (0x01) // 6.0
-#define R_FORWARD              (0x02) // 6.1
-#define L_FORWARD              (0x04) // 6.2
-#define R_REVERSE              (0x08) // 6.3
-#define L_REVERSE              (0x10) // 6.4
+#define L_FORWARD              (0x02) // 6.1
+#define R_FORWARD              (0x04) // 6.2
+#define L_REVERSE              (0x08) // 6.3
+#define R_REVERSE              (0x10) // 6.4
 #define P6_5                   (0x20) // 6.5
 #define GRN_LED                (0x40) // 6.6
 
