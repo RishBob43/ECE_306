@@ -61,6 +61,7 @@
 #include "ADC.h"
 #include "hex_to_bcd.h"
 #include "serial.h"
+#include "dac.h"
 
 /*==============================================================================
  * Externs
@@ -81,7 +82,7 @@ extern volatile unsigned char display_changed;
                                  P6OUT &= ~(R_REVERSE | L_REVERSE);  } while(0)
 #define MOTORS_REVERSE()    do { P6OUT |=  (R_REVERSE | L_REVERSE); \
                                  P6OUT &= ~(R_FORWARD | L_FORWARD);  } while(0)
-/*  Turn RIGHT – LEFT wheel drives, right wheel off  (directions swapped per P7 note) */
+/*  Turn RIGHT – LEFT wheel drives, right wheel off  */
 #define MOTOR_TURN_RIGHT()  do { P6OUT |=  L_FORWARD; \
                                  P6OUT &= ~(R_FORWARD | R_REVERSE | L_REVERSE); } while(0)
 /*  Turn LEFT  – RIGHT wheel drives, left wheel off */
@@ -100,7 +101,7 @@ extern volatile unsigned char display_changed;
  * IoT / motor timing
  *==============================================================================*/
 #define TIME_UNIT_MS            (500u)    /* each 'tttt' unit = 500 ms           */
-#define CYCLES_PER_MS           (8000u)
+
 
 /*==============================================================================
  * Security PIN
@@ -126,24 +127,32 @@ extern volatile unsigned char display_changed;
  * Timing constants (1 tick = 200 ms from TB0 CCR0)
  *==============================================================================*/
 #define TICKS_15_SEC            (75u)   /* 15 s mandatory pause                  */
-#define TICKS_ALIGN_TIMEOUT     (100u)  /* 20 s max alignment attempt            */
 #define TICKS_EXIT_TURN         (10u)   /* ~2 s exit spin                        */
-#define TICKS_EXIT_DRIVE        (20u)   /* ~4 s straight drive > 2 feet          */
 #define TICKS_CAL_SETTLE        (15u)   /* 3 s settle per calibration phase      */
 #define SPLASH_TICKS            (25u)   /* 5 s splash                            */
 
 /*==============================================================================
- * Lap counting
- *   Count white->black rising edges on the right detector.
- *   Empirically ~4 edges per 2 laps on a 36-inch circle.
- *==============================================================================*/
-#define LAP_EDGE_COUNT          (4u)
-
-/*==============================================================================
  * Calibration
  *==============================================================================*/
-#define NUM_CAL_SAMPLES         (8u)
 #define CAL_THRESHOLD_MARGIN    (50u)
+
+/*==============================================================================
+ * White confirmation filter
+ *   The sensor must see white for WHITE_CONFIRM_COUNT consecutive ADC updates
+ *   (~10 ms each) before black detection is re-armed.  This prevents floor
+ *   specks and debris from triggering a false black reading.
+ *   Increase to 8-10 if false triggers still occur.
+ *==============================================================================*/
+#define WHITE_CONFIRM_COUNT     (5u)
+
+/*==============================================================================
+ * Lost-line recovery
+ *   If neither sensor sees the line for LOST_LINE_LIMIT consecutive
+ *   line_follow_step() calls the car spins back toward the circle rather
+ *   than driving straight off the mat.
+ *   LOST_LINE_LIMIT is in units of main-loop passes (not ms ticks).
+ *==============================================================================*/
+#define LOST_LINE_LIMIT         (20u)
 
 /*==============================================================================
  * Module globals – calibration
@@ -163,6 +172,20 @@ static unsigned char g_lap_edges       = 0u;
 static unsigned char g_prev_right_black = FALSE;
 static unsigned char g_exit_phase      = 0u;  /* 0=turn, 1=straight             */
 static unsigned char g_exit_requested  = FALSE;
+
+/*==============================================================================
+ * Module globals – white-confirmation filter
+ *   Separate counters for each sensor.  Counts consecutive ADC-updated passes
+ *   where the sensor reads white.  Black is trusted immediately; white is only
+ *   accepted after WHITE_CONFIRM_COUNT consecutive white readings.
+ *==============================================================================*/
+static unsigned char g_white_confirm_L = 0u;
+static unsigned char g_white_confirm_R = 0u;
+
+/*==============================================================================
+ * Module globals – lost-line recovery counter
+ *==============================================================================*/
+static unsigned int  g_lost_line_count = 0u;
 
 /*==============================================================================
  * Module globals – IoT course
@@ -205,7 +228,7 @@ static void set_line(int line, const char *msg){
 }
 
 /*==============================================================================
- * Helper: set_line_char – build from individual chars already in buffer
+ * Helper: flag_display
  *==============================================================================*/
 static void flag_display(void){
     display_changed = TRUE;
@@ -335,7 +358,12 @@ static void run_calibration(void){
     Display_Update(0,0,0,0);
     settle = 0u;
     while(settle < TICKS_CAL_SETTLE){
-        if(update_display){ update_display = FALSE; settle++; }
+        if(update_display_count > 0u){
+            update_display_count--;
+            update_display = TRUE;
+            settle++;
+        }
+        Display_Process();
     }
     average_adc_samples(0u);  /* discard ambient */
     average_adc_samples(1u);
@@ -349,7 +377,12 @@ static void run_calibration(void){
     Display_Update(0,0,0,0);
     settle = 0u;
     while(settle < TICKS_CAL_SETTLE){
-        if(update_display){ update_display = FALSE; settle++; }
+            if(update_display_count > 0u){
+                update_display_count--;
+                update_display = TRUE;
+                settle++;
+            }
+            Display_Process();
     }
     g_white_left  = average_adc_samples(0u);
     g_white_right = average_adc_samples(1u);
@@ -362,7 +395,12 @@ static void run_calibration(void){
     Display_Update(0,0,0,0);
     settle = 0u;
     while(settle < TICKS_CAL_SETTLE * 3u){
-        if(update_display){ update_display = FALSE; settle++; }
+        if(update_display_count > 0u){
+            update_display_count--;
+            update_display = TRUE;
+            settle++;
+        }
+        Display_Process();
     }
     g_black_left  = average_adc_samples(0u);
     g_black_right = average_adc_samples(1u);
@@ -373,31 +411,122 @@ static void run_calibration(void){
 }
 
 /*==============================================================================
- * Line detection (dynamic threshold)
+ * Line detection – base dynamic threshold (no filter)
  *==============================================================================*/
-static unsigned char is_black_left_dyn(void){
+static unsigned char is_black_left_raw(void){
     return (ADC_Left_Detect  > g_threshold) ? TRUE : FALSE;
 }
-static unsigned char is_black_right_dyn(void){
+static unsigned char is_black_right_raw(void){
     return (ADC_Right_Detect > g_threshold) ? TRUE : FALSE;
 }
+
+/*==============================================================================
+ * Line detection – white-confirmation filtered versions
+ *
+ *   Black is trusted immediately (fast reaction to finding the line).
+ *   White is only accepted after WHITE_CONFIRM_COUNT consecutive white
+ *   readings, preventing floor specks from briefly interrupting detection.
+ *
+ *   Call these instead of is_black_left_raw() / is_black_right_raw() in all
+ *   line-following and lap-counting code.
+ *==============================================================================*/
+static unsigned char is_black_left_filtered(void){
+    if(is_black_left_raw()){
+        g_white_confirm_L = 0u;   /* reset white streak – definitely black now */
+        return TRUE;
+    }
+    /* Reading is white; only accept it after enough consecutive white reads   */
+    if(g_white_confirm_L < WHITE_CONFIRM_COUNT){
+        g_white_confirm_L++;
+        return TRUE;              /* still treating as "black" until confirmed  */
+    }
+    return FALSE;                 /* confirmed white                            */
+}
+
+static unsigned char is_black_right_filtered(void){
+    if(is_black_right_raw()){
+        g_white_confirm_R = 0u;
+        return TRUE;
+    }
+    if(g_white_confirm_R < WHITE_CONFIRM_COUNT){
+        g_white_confirm_R++;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/*==============================================================================
+ * get_line_state_dyn – uses filtered sensor readings
+ *==============================================================================*/
 static unsigned char get_line_state_dyn(void){
     unsigned char s = LINE_NONE;
-    if(is_black_left_dyn())  s |= LINE_LEFT;
-    if(is_black_right_dyn()) s |= LINE_RIGHT;
+    if(is_black_left_filtered())  s |= LINE_LEFT;
+    if(is_black_right_filtered()) s |= LINE_RIGHT;
     return s;
 }
 
 /*==============================================================================
- * line_follow_step – reactive two-sensor follower
- *   Directions swapped vs. P6: LEFT sensor on line -> turn LEFT (right wheel)
+ * line_follow_step – reactive two-sensor circle follower
+ *
+ * Improvements over the original bang-bang follower:
+ *
+ *   1. LINE_BOTH applies an inside bias (MOTOR_TURN_RIGHT) so the car
+ *      hugs the inside of the circle instead of straightening out and
+ *      overshooting to the outside.
+ *      → Swap MOTOR_TURN_RIGHT ↔ MOTOR_TURN_LEFT if your circle runs CCW.
+ *
+ *   2. Lost-line recovery: if neither sensor sees black for LOST_LINE_LIMIT
+ *      consecutive calls the car spins toward the circle (MOTOR_TURN_RIGHT)
+ *      instead of driving straight off the mat.
+ *      → Swap to MOTOR_TURN_LEFT if your circle runs CCW.
+ *
+ *   Filter state (g_white_confirm_L/R, g_lost_line_count) is reset at the
+ *   start of BL_CIRCLE so it does not carry stale data from earlier states.
  *==============================================================================*/
 static void line_follow_step(void){
-    switch(get_line_state_dyn()){
-        case LINE_BOTH:   MOTORS_FORWARD();    break;
-        case LINE_LEFT:   MOTOR_TURN_LEFT();   break;
-        case LINE_RIGHT:  MOTOR_TURN_RIGHT();  break;
-        default:          MOTORS_FORWARD();    break;
+    unsigned char state = get_line_state_dyn();
+
+    if(state == LINE_NONE){
+        g_lost_line_count++;
+        if(g_lost_line_count > LOST_LINE_LIMIT){
+            /*------------------------------------------------------------------
+             * Line lost too long – spin back toward the circle.
+             * MOTOR_TURN_RIGHT keeps a CW circle; swap to LEFT for CCW.
+             *----------------------------------------------------------------*/
+            MOTOR_TURN_RIGHT();
+        } else {
+            /* Grace period: coast straight hoping to re-acquire line          */
+            MOTORS_FORWARD();
+        }
+        return;
+    }
+
+    /* Line seen – reset lost counter */
+    g_lost_line_count = 0u;
+
+    switch(state){
+        case LINE_BOTH:
+            /*------------------------------------------------------------------
+             * Both sensors on the line.  Apply a gentle inside bias so the
+             * car stays on the circular arc rather than cutting straight across.
+             * Change MOTOR_TURN_RIGHT to MOTOR_TURN_LEFT for a CCW circle.
+             *----------------------------------------------------------------*/
+            MOTOR_TURN_RIGHT();
+            break;
+
+        case LINE_LEFT:
+            /* Left sensor on black – drifting right, correct left            */
+            MOTOR_TURN_LEFT();
+            break;
+
+        case LINE_RIGHT:
+            /* Right sensor on black – drifting left, correct right           */
+            MOTOR_TURN_RIGHT();
+            break;
+
+        default:
+            MOTOR_TURN_RIGHT();
+            break;
     }
 }
 
@@ -434,40 +563,67 @@ static void parse_cwjap(const char *line){
 }
 
 static void parse_cifsr(const char *line){
-    unsigned int i = 0u, j = 0u, dot_count = 0u;
+    unsigned int i = 0u, j = 0u;
     char ip[16];
-    char half1[8], half2[8];
-    unsigned int h1len, h2len;
+    char half1[11], half2[11];
+    unsigned int h1len, h2len, split;
+
+    /* Find STAIP specifically, skip STAMAC lines */
+    i = 0u;
     while(line[i] != '\0'){
-        if(ch_match(&line[i], "STAIP", 5u)){ break; }
+        if(ch_match(&line[i], "STAIP,", 6u)){ break; }
         i++;
     }
-    if(line[i] == '\0'){ return; }
-    while(line[i] != '"' && line[i] != '\0'){ i++; }
-    if(line[i] == '\0'){ return; }
-    i++;
+    if(line[i] == '\0'){ return; }    /* not a STAIP line */
+    i += 6u;                          /* skip past "STAIP," */
+
+    /* Skip opening quote */
+    if(line[i] == '"'){ i++; }
+
+    /* Copy IP digits until closing quote or end */
+    j = 0u;
     while(line[i] != '"' && line[i] != '\0' && j < 15u){
         ip[j++] = line[i++];
     }
     ip[j] = '\0';
     if(j == 0u){ return; }
-    for(i = 0u; i < j; i++){
-        if(ip[i] == '.'){ dot_count++; }
-        if(dot_count == 2u){
-            h1len = i;
-            h2len = j - i - 1u;
-            if(h1len > 7u){ h1len = 7u; }
-            if(h2len > 7u){ h2len = 7u; }
-            strncpy(half1, ip,        h1len); half1[h1len] = '\0';
-            strncpy(half2, &ip[i+1u], h2len); half2[h2len] = '\0';
-            center_string(half1, h1len, ip_oct12);
-            center_string(half2, h2len, ip_oct34);
-            return;
-        }
-    }
-    center_string(ip, j, ip_oct12);
-}
 
+    /* Find the second dot to split into two display halves:
+     *   "192.168.1.216" -> half1="192.168" half2="1.216"
+     *   We want octet1.octet2 on line 1 and octet3.octet4 on line 2.
+     * Walk forward counting dots; split after the second dot's position. */
+    split = 0u;
+    {
+        unsigned int dot_count = 0u;
+        for(i = 0u; i < j; i++){
+            if(ip[i] == '.'){
+                dot_count++;
+                if(dot_count == 2u){
+                    split = i;   /* index of the second dot */
+                    break;
+                }
+            }
+        }
+        if(dot_count < 2u){ split = j; }  /* fallback: whole IP on line 1 */
+    }
+
+    /* half1 = everything before the second dot (e.g. "192.168") */
+    h1len = split;
+    if(h1len > 10u){ h1len = 10u; }
+    strncpy(half1, ip, h1len);
+    half1[h1len] = '\0';
+
+    /* half2 = everything after the second dot (e.g. "1.216") */
+    h2len = (split < j) ? (j - split - 1u) : 0u;
+    if(h2len > 10u){ h2len = 10u; }
+    if(h2len > 0u){
+        strncpy(half2, &ip[split + 1u], h2len);
+    }
+    half2[h2len] = '\0';
+
+    center_string(half1, h1len, ip_oct12);
+    center_string(half2, h2len, ip_oct34);
+}
 /*==============================================================================
  * parse_web_command
  *
@@ -549,9 +705,13 @@ static void parse_web_command(const char *payload){
                 g_bl_state  = BL_START;
                 g_bl_timer  = 0u;
                 g_lap_edges = 0u;
-                g_prev_right_black = is_black_right_dyn();
+                g_prev_right_black = is_black_right_filtered();
                 g_exit_requested   = FALSE;
                 g_exit_phase       = 0u;
+                /* Reset filter state for clean start */
+                g_white_confirm_L  = 0u;
+                g_white_confirm_R  = 0u;
+                g_lost_line_count  = 0u;
                 set_line(0, "BL Start  ");
                 show_course_display();
                 Display_Update(0,0,0,0);
@@ -584,7 +744,7 @@ static void process_iot_msg(void){
 
     if(ch_match(msg, "+CWJAP:", 7u)){
         parse_cwjap(msg);
-    } else if(ch_match(msg, "+CIFSR:", 7u)){
+    } else if(ch_match(msg, "+CIFSR:STAIP", 12u)){
         parse_cifsr(msg);
     } else if(ch_match(msg, "+IPD", 4u)){
         k = 0u;
@@ -730,7 +890,7 @@ static void bl_state_machine(unsigned char tick_consumed){
             line_follow_step();
             if(tick_consumed){ g_bl_timer++; }
             {
-                unsigned char cur = is_black_right_dyn();
+                unsigned char cur = is_black_right_filtered();
                 if((cur == TRUE) && (g_prev_right_black == FALSE)){
                     /* First rising edge after travel start = circle entry */
                     g_lap_edges++;
@@ -743,7 +903,7 @@ static void bl_state_machine(unsigned char tick_consumed){
                 g_bl_state  = BL_PAUSE3;
                 g_bl_timer  = 0u;
                 g_lap_edges = 0u;
-                g_prev_right_black = is_black_right_dyn();
+                g_prev_right_black = is_black_right_filtered();
                 set_line(0, "BL Circle ");
                 show_course_display();
                 Display_Update(0,0,0,0);
@@ -771,25 +931,32 @@ static void bl_state_machine(unsigned char tick_consumed){
                 g_bl_timer  = 0u;
                 g_bl_state  = BL_CIRCLE;
                 g_lap_edges = 0u;
-                g_prev_right_black = is_black_right_dyn();
+                /* Reset filter state so stale TRAVEL readings don't affect   */
+                /* the lap-edge counter on the very first circle pass.         */
+                g_white_confirm_L  = 0u;
+                g_white_confirm_R  = 0u;
+                g_lost_line_count  = 0u;
+                g_prev_right_black = is_black_right_filtered();
                 /* Already showing "BL Circle" – continue following */
             }
             break;
 
         /*----------------------------------------------------------------------
          * BL_CIRCLE – follow circle, count laps
+         *   line_follow_step() now uses the filtered sensor readings and the
+         *   inside-bias + lost-line recovery logic defined above.
          *--------------------------------------------------------------------*/
         case BL_CIRCLE:
             line_follow_step();
             {
-                unsigned char cur = is_black_right_dyn();
+                unsigned char cur = is_black_right_filtered();
                 if((cur == TRUE) && (g_prev_right_black == FALSE)){
                     g_lap_edges++;
                 }
                 g_prev_right_black = cur;
             }
             /* Check for exit command (set by parse_web_command) */
-            if(g_exit_requested && g_lap_edges >= LAP_EDGE_COUNT){
+            if(g_exit_requested){
                 g_exit_requested = FALSE;
                 MOTORS_ALL_OFF();
                 g_bl_state   = BL_EXIT;
@@ -855,9 +1022,18 @@ void main(void){
     Init_Clocks();
     Init_Conditions();
     Init_Timers();
+    /* DAC init + soft-start ramp */
+    Init_DAC();
+    /* Wait for ramp to complete (DAC_Ramp_Step disables TBIE when done) */
+    while(!DAC_ready){
+        /* TB0 overflow ISR is running the ramp; foreground just waits */
+    }
+    /* Set cruise voltage */
+    DAC_Set(DAC_CRUISE);
     Init_LCD();
     Init_ADC();
     Init_Timer_B1();
+
 
     MOTORS_ALL_OFF();
     IR_LED_control(IR_LED_OFF);
@@ -905,7 +1081,6 @@ void main(void){
         if(iot_msg_ready){ process_iot_msg(); }
         if(state_timer == 5u){  UCA0_Transmit_String("AT+CWJAP?\r\n", 11u); }
         if(state_timer == 30u){ UCA0_Transmit_String("AT+CIFSR\r\n",  10u); }
-        if(ssid_display[5] != ' ' && ip_oct12[5] != ' '){ break; }
     }
 
     /* ── Calibration ── */
