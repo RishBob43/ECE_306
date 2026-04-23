@@ -1,30 +1,54 @@
 /*------------------------------------------------------------------------------
- * File:        main.c  (Project 9)
+ * File:        main.c  (Project 10)
  * Target:      MSP430FR2355
  *
- * Description: IOT bridge using Init_IOT() / iot_rx_msg approach.
+ * Description: Project 10 – WiFi-controlled IoT course + autonomous black-line
+ *              circle follower.
  *
- *              Startup:
- *                Splash 5 s -> Init_IOT() -> parse SSID/IP from iot_rx_msg
- *                -> display on LCD -> bridge active
+ * ── IoT Course (Phase 1) ────────────────────────────────────────────────────
+ *   Startup:  Auto-connect, display SSID + IP -> calibrate -> "Waiting for input"
+ *   Course:   Drive to pads 1-8 via web commands; display "Arrived 0X" on pad.
+ *             First command starts a seconds counter displayed on line 3.
  *
- *              LCD layout (after connect):
- *                Line 0:  SSID           (centered, max 10 chars)
- *                Line 1:  "IP address"   (literal, centered)
- *                Line 2:  octets 1-2     (centered)
- *                Line 3:  octets 3-4     (centered)
+ *   Web command format (via TCP port 6767):
+ *     ^1234Dtttt   D = F/B/R/L/S/A/E  tttt = time units (500 ms each)
+ *     ^1234PX      Pad arrival: X = 1-8, displays "Arrived 0X"
+ *     ^1234G       Go autonomous (triggers BL state machine)
+ *     ^1234X       Exit circle (triggers BL_EXIT)
  *
- *              When web command received:
- *                lcd_BIG_mid() shows "D NN" on enlarged middle line
- *                lcd_4line()  + SSID/IP restored when command finishes
+ * ── Autonomous Phase (Phase 2) ──────────────────────────────────────────────
+ *   State machine with mandatory 10-20 s stops between stages:
  *
- *              FRAM terminal ^ commands (not forwarded to IOT):
- *                ^^  -> "I'm here\r\n"
- *                ^F  -> set IOT baud 115,200
- *                ^S  -> set IOT baud 9,600
+ *     BL_START   -> drive forward toward line        display "BL Start  "
+ *     BL_PAUSE1  -> 15 s stop after intercept        display "Intercept "
+ *     BL_TURN    -> rotate until both on black       display "BL Turn   "
+ *     BL_PAUSE2  -> 15 s stop after turn             display "BL Turn   "
+ *     BL_TRAVEL  -> follow line to circle            display "BL Travel "
+ *     BL_PAUSE3  -> 15 s stop (within first lap)     display "BL Circle "
+ *     BL_CIRCLE  -> follow line, count 2 laps        display "BL Circle "
+ *     BL_EXIT    -> commanded exit: turn + straight  display "BL Exit   "
+ *     BL_STOP    -> stopped, display completion      display "BL Stop   "
  *
- *              Web command format: ^1234Dtttt
- *                ^ = start, 1234 = PIN, D = F/B/R/L, tttt = time units
+ * ── Display Layout ───────────────────────────────────────────────────────────
+ *   IoT mode:
+ *     Line 0: "Arrived 0X" or blank / BL status in autonomous
+ *     Line 1: IP octet 1-2   (e.g. " 10.155  ")
+ *     Line 2: IP octet 3-4   (e.g. " .102.202")
+ *     Line 3: "Dcmd  NNNs" – last cmd char + seconds counter
+ *
+ *   BL_STOP final screen:
+ *     Line 0: "BL Stop   "
+ *     Line 1: "Kachow!   "   (custom completion message)
+ *     Line 2: "Good job! "
+ *     Line 3: "Time:NNNs "
+ *
+ * ── Calibration Display ──────────────────────────────────────────────────────
+ *   After calibration completes:
+ *     Line 0: "Waiting   "
+ *     Line 1: "for input "
+ *     Line 2: ip_oct12
+ *     Line 3: ip_oct34
+ *
  *------------------------------------------------------------------------------*/
 
 #include "msp430.h"
@@ -34,6 +58,8 @@
 #include "ports.h"
 #include "macros.h"
 #include "timerB0.h"
+#include "ADC.h"
+#include "hex_to_bcd.h"
 #include "serial.h"
 
 /*==============================================================================
@@ -50,48 +76,112 @@ extern volatile unsigned char display_changed;
 /*==============================================================================
  * Motor GPIO macros
  *==============================================================================*/
-#define MOTORS_ALL_OFF()  (P6OUT &= ~(R_FORWARD | L_FORWARD | R_REVERSE | L_REVERSE))
-#define MOTOR_FORWARD()   { MOTORS_ALL_OFF(); P6OUT |= (R_FORWARD | L_FORWARD); }
-#define MOTOR_REVERSE()   { MOTORS_ALL_OFF(); P6OUT |= (R_REVERSE | L_REVERSE); }
-#define MOTOR_RIGHT()     { MOTORS_ALL_OFF(); P6OUT |= (L_FORWARD | R_REVERSE); }
-#define MOTOR_LEFT()      { MOTORS_ALL_OFF(); P6OUT |= R_FORWARD; }
+#define MOTORS_ALL_OFF()    (P6OUT &= ~(R_FORWARD | L_FORWARD | R_REVERSE | L_REVERSE))
+#define MOTORS_FORWARD()    do { P6OUT |=  (R_FORWARD | L_FORWARD); \
+                                 P6OUT &= ~(R_REVERSE | L_REVERSE);  } while(0)
+#define MOTORS_REVERSE()    do { P6OUT |=  (R_REVERSE | L_REVERSE); \
+                                 P6OUT &= ~(R_FORWARD | L_FORWARD);  } while(0)
+/*  Turn RIGHT – LEFT wheel drives, right wheel off  (directions swapped per P7 note) */
+#define MOTOR_TURN_RIGHT()  do { P6OUT |=  L_FORWARD; \
+                                 P6OUT &= ~(R_FORWARD | R_REVERSE | L_REVERSE); } while(0)
+/*  Turn LEFT  – RIGHT wheel drives, left wheel off */
+#define MOTOR_TURN_LEFT()   do { P6OUT |=  R_FORWARD; \
+                                 P6OUT &= ~(L_FORWARD | R_REVERSE | L_REVERSE); } while(0)
+/*  Spin for IoT course turns */
+#define MOTOR_IOT_RIGHT()   do { P6OUT |=  (L_FORWARD | R_REVERSE); \
+                                 P6OUT &= ~(R_FORWARD | L_REVERSE);  } while(0)
+#define MOTOR_IOT_LEFT()    do { P6OUT |=  (R_FORWARD | L_REVERSE); \
+                                 P6OUT &= ~(L_FORWARD | R_REVERSE);  } while(0)
+/*  Exit turn: spin away from circle (away from pad 8 direction) */
+#define MOTOR_EXIT_TURN()   do { P6OUT |=  (R_FORWARD | L_REVERSE); \
+                                 P6OUT &= ~(L_FORWARD | R_REVERSE);  } while(0)
 
 /*==============================================================================
- * Motor timing  (tune on bench)
+ * IoT / motor timing
  *==============================================================================*/
-#define TIME_UNIT_MS        (500u)
+#define TIME_UNIT_MS            (500u)    /* each 'tttt' unit = 500 ms           */
+#define CYCLES_PER_MS           (8000u)
 
 /*==============================================================================
  * Security PIN
  *==============================================================================*/
-#define SECRET_PIN          "1234"
-#define SECRET_PIN_LEN      (4u)
+#define SECRET_PIN              "1234"
+#define SECRET_PIN_LEN          (4u)
 
 /*==============================================================================
- * State machine
+ * Autonomous BL state identifiers
  *==============================================================================*/
-#define STATE_SPLASH        (0u)
-#define STATE_IOT_INIT      (1u)
-#define STATE_ACTIVE        (2u)
-#define STATE_MOTOR         (3u)
-#define STATE_IOT_QUERY     (4u)
+#define BL_NONE                 (0u)
+#define BL_START                (1u)   /* driving toward line                    */
+#define BL_PAUSE1               (2u)   /* 15 s stop: "Intercept" displayed       */
+#define BL_TURN                 (3u)   /* rotating until both sensors on black   */
+#define BL_PAUSE2               (4u)   /* 15 s stop after turn                   */
+#define BL_TRAVEL               (5u)   /* following line toward circle           */
+#define BL_PAUSE3               (6u)   /* 15 s stop to show "BL Circle"          */
+#define BL_CIRCLE               (7u)   /* following circle, counting laps        */
+#define BL_EXIT                 (8u)   /* exit commanded: turn + straight        */
+#define BL_STOP                 (9u)   /* fully stopped, show completion screen  */
 
 /*==============================================================================
- * Motor state
+ * Timing constants (1 tick = 200 ms from TB0 CCR0)
  *==============================================================================*/
-static unsigned char motor_direction       = 'F';
-static unsigned int  motor_units_remaining = 0u;
+#define TICKS_15_SEC            (75u)   /* 15 s mandatory pause                  */
+#define TICKS_ALIGN_TIMEOUT     (100u)  /* 20 s max alignment attempt            */
+#define TICKS_EXIT_TURN         (10u)   /* ~2 s exit spin                        */
+#define TICKS_EXIT_DRIVE        (20u)   /* ~4 s straight drive > 2 feet          */
+#define TICKS_CAL_SETTLE        (15u)   /* 3 s settle per calibration phase      */
+#define SPLASH_TICKS            (25u)   /* 5 s splash                            */
 
 /*==============================================================================
- * SSID / IP display strings (centered, 10 chars each)
+ * Lap counting
+ *   Count white->black rising edges on the right detector.
+ *   Empirically ~4 edges per 2 laps on a 36-inch circle.
  *==============================================================================*/
-static char ssid_display[11] = "          ";
-static char ip_oct12[11]     = "          ";
-static char ip_oct34[11]     = "          ";
+#define LAP_EDGE_COUNT          (4u)
 
 /*==============================================================================
- * center_string
- * Writes 'text' (len chars) centered into a 10-char null-terminated 'out'.
+ * Calibration
+ *==============================================================================*/
+#define NUM_CAL_SAMPLES         (8u)
+#define CAL_THRESHOLD_MARGIN    (50u)
+
+/*==============================================================================
+ * Module globals – calibration
+ *==============================================================================*/
+static unsigned int  g_white_left    = 0u;
+static unsigned int  g_white_right   = 0u;
+static unsigned int  g_black_left    = 0u;
+static unsigned int  g_black_right   = 0u;
+static unsigned int  g_threshold     = BLACK_LINE_THRESHOLD;
+
+/*==============================================================================
+ * Module globals – autonomous
+ *==============================================================================*/
+static unsigned char g_bl_state        = BL_NONE;
+static unsigned int  g_bl_timer        = 0u;
+static unsigned char g_lap_edges       = 0u;
+static unsigned char g_prev_right_black = FALSE;
+static unsigned char g_exit_phase      = 0u;  /* 0=turn, 1=straight             */
+static unsigned char g_exit_requested  = FALSE;
+
+/*==============================================================================
+ * Module globals – IoT course
+ *==============================================================================*/
+static char     ssid_display[11] = "          ";
+static char     ip_oct12[11]     = "          ";
+static char     ip_oct34[11]     = "          ";
+
+static unsigned char  g_on_pad         = FALSE;  /* TRUE when Arrived cmd received */
+static unsigned char  g_pad_number     = 0u;
+static unsigned char  g_course_active  = FALSE;  /* TRUE after first command       */
+static unsigned int   g_course_secs    = 0u;     /* seconds counter                */
+static unsigned int   g_sec_ticks      = 0u;     /* ticks toward next second       */
+static char           g_last_cmd[6]    = "     "; /* 5 relevant chars + null       */
+static unsigned char  g_autonomous     = FALSE;  /* TRUE when G command received   */
+static unsigned char  g_cal_done       = FALSE;
+
+/*==============================================================================
+ * Helper: center_string – write text centered into a 10-char buffer
  *==============================================================================*/
 static void center_string(const char *text, unsigned int len, char *out){
     unsigned int pad_left, pad_right, i, pos;
@@ -106,7 +196,7 @@ static void center_string(const char *text, unsigned int len, char *out){
 }
 
 /*==============================================================================
- * set_line  – copy msg into display_line[line] and flag changed
+ * Helper: set_line – copy msg into display_line[line] and flag changed
  *==============================================================================*/
 static void set_line(int line, const char *msg){
     strncpy(display_line[line], msg, 10u);
@@ -115,31 +205,205 @@ static void set_line(int line, const char *msg){
 }
 
 /*==============================================================================
- * display_ssid_ip
- * Restores the 4-line info screen.
+ * Helper: set_line_char – build from individual chars already in buffer
  *==============================================================================*/
-static void display_ssid_ip(void){
-    lcd_4line();
-    set_line(0, ssid_display);
-    set_line(1, "IP address");
-    set_line(2, ip_oct12);
-    set_line(3, ip_oct34);
-    Display_Update(0, 0, 0, 0);
+static void flag_display(void){
+    display_changed = TRUE;
 }
 
 /*==============================================================================
- * process_iot_msg
- *
- * Called from main whenever iot_msg_ready is set.
- * Parses the single line in iot_rx_msg[] for:
- *   +CWJAP:"ssid",...  -> extract and center SSID
- *   +CIFSR:STAIP,"ip"  -> split and center IP octets
- *   +IPD,x,n:payload   -> extract TCP payload, look for web command
- *
- * After processing, clears iot_msg_ready and re-enables UCA0 RX interrupt.
+ * show_course_display
+ * Updates all four LCD lines for IoT remote-control mode.
+ *   Line 0: "Arrived 0X" if on pad, else "          " (or BL status)
+ *   Line 1: ip_oct12
+ *   Line 2: ip_oct34
+ *   Line 3: last cmd (5 chars) + "  " + seconds counter
  *==============================================================================*/
+static void show_course_display(void){
+    char line3[11];
+    unsigned int s = g_course_secs;
+    unsigned char d2, d1, d0;
 
-/* helpers ------------------------------------------------------------------ */
+    /* Line 0: pad arrived or blank (BL states handled by caller) */
+    if(!g_autonomous){
+        if(g_on_pad){
+            char pad_msg[11] = "Arrived 0 ";
+            pad_msg[9] = (char)('0' + g_pad_number);
+            set_line(0, pad_msg);
+        } else {
+            set_line(0, "          ");
+        }
+    }
+
+    /* Lines 1-2: IP address */
+    set_line(1, ip_oct12);
+    set_line(2, ip_oct34);
+
+    /* Line 3: "Dcmd  NNNs"  (last cmd char, then seconds) */
+    d2 = (unsigned char)(s / 100u);
+    s %= 100u;
+    d1 = (unsigned char)(s / 10u);
+    d0 = (unsigned char)(s % 10u);
+
+    line3[0] = g_last_cmd[0];
+    line3[1] = g_last_cmd[1];
+    line3[2] = g_last_cmd[2];
+    line3[3] = g_last_cmd[3];
+    line3[4] = g_last_cmd[4];
+    line3[5] = ' ';
+    line3[6] = (char)('0' + d2);
+    line3[7] = (char)('0' + d1);
+    line3[8] = (char)('0' + d0);
+    line3[9] = 's';
+    line3[10] = '\0';
+    set_line(3, line3);
+}
+
+/*==============================================================================
+ * show_waiting_display – shown after calibration, before first command
+ *==============================================================================*/
+static void show_waiting_display(void){
+    set_line(0, "Waiting   ");
+    set_line(1, "for input ");
+    set_line(2, ip_oct12);
+    set_line(3, ip_oct34);
+    Display_Update(0,0,0,0);
+}
+
+/*==============================================================================
+ * show_bl_stop_display – final completion screen
+ *==============================================================================*/
+static void show_bl_stop_display(void){
+    char time_line[11];
+    unsigned int s = g_course_secs;
+    unsigned char d2, d1, d0;
+
+    d2 = (unsigned char)(s / 100u);
+    s %= 100u;
+    d1 = (unsigned char)(s / 10u);
+    d0 = (unsigned char)(s % 10u);
+
+    time_line[0] = 'T'; time_line[1] = 'i'; time_line[2] = 'm';
+    time_line[3] = 'e'; time_line[4] = ':';
+    time_line[5] = (char)('0' + d2);
+    time_line[6] = (char)('0' + d1);
+    time_line[7] = (char)('0' + d0);
+    time_line[8] = 's'; time_line[9] = ' '; time_line[10] = '\0';
+
+    set_line(0, "BL Stop   ");
+    set_line(1, "Kachow!   ");
+    set_line(2, "Good job! ");
+    set_line(3, time_line);
+    Display_Update(0,0,0,0);
+}
+
+/*==============================================================================
+ * Calibration helpers
+ *==============================================================================*/
+static unsigned int average_adc_samples(unsigned char channel_flag){
+    unsigned int  sum   = 0u;
+    unsigned char count = 0u;
+    while(count < NUM_CAL_SAMPLES){
+        if(ADC_updated){
+            ADC_updated = FALSE;
+            sum += (channel_flag == 0u) ? ADC_Left_Detect : ADC_Right_Detect;
+            count++;
+        }
+    }
+    return (sum / NUM_CAL_SAMPLES);
+}
+
+static void update_dynamic_threshold(void){
+    unsigned int white_avg = (g_white_left  + g_white_right)  / 2u;
+    unsigned int black_avg = (g_black_left  + g_black_right)  / 2u;
+    if(black_avg > (white_avg + CAL_THRESHOLD_MARGIN)){
+        g_threshold = (white_avg + black_avg) / 2u;
+    } else {
+        g_threshold = BLACK_LINE_THRESHOLD;
+    }
+}
+
+static void run_calibration(void){
+    unsigned char settle;
+
+    /* Phase 0: ambient (emitter OFF) */
+    IR_LED_control(IR_LED_OFF);
+    set_line(0, "CAL:AMBT  ");
+    set_line(1, "Emitter   ");
+    set_line(2, "OFF       ");
+    set_line(3, "Place:WHT ");
+    Display_Update(0,0,0,0);
+    settle = 0u;
+    while(settle < TICKS_CAL_SETTLE){
+        if(update_display){ update_display = FALSE; settle++; }
+    }
+    average_adc_samples(0u);  /* discard ambient */
+    average_adc_samples(1u);
+
+    /* Phase 1: white baseline (emitter ON) */
+    IR_LED_control(IR_LED_ON);
+    set_line(0, "CAL:WHITE ");
+    set_line(1, "Emitter ON");
+    set_line(2, "On White  ");
+    set_line(3, "Place:WHT ");
+    Display_Update(0,0,0,0);
+    settle = 0u;
+    while(settle < TICKS_CAL_SETTLE){
+        if(update_display){ update_display = FALSE; settle++; }
+    }
+    g_white_left  = average_adc_samples(0u);
+    g_white_right = average_adc_samples(1u);
+
+    /* Phase 2: black line (emitter ON) */
+    set_line(0, "CAL:BLACK ");
+    set_line(1, "Move to   ");
+    set_line(2, "BLACK line");
+    set_line(3, "Place:BLK ");
+    Display_Update(0,0,0,0);
+    settle = 0u;
+    while(settle < TICKS_CAL_SETTLE * 3u){
+        if(update_display){ update_display = FALSE; settle++; }
+    }
+    g_black_left  = average_adc_samples(0u);
+    g_black_right = average_adc_samples(1u);
+
+    update_dynamic_threshold();
+    IR_LED_control(IR_LED_ON);   /* leave on for driving */
+    g_cal_done = TRUE;
+}
+
+/*==============================================================================
+ * Line detection (dynamic threshold)
+ *==============================================================================*/
+static unsigned char is_black_left_dyn(void){
+    return (ADC_Left_Detect  > g_threshold) ? TRUE : FALSE;
+}
+static unsigned char is_black_right_dyn(void){
+    return (ADC_Right_Detect > g_threshold) ? TRUE : FALSE;
+}
+static unsigned char get_line_state_dyn(void){
+    unsigned char s = LINE_NONE;
+    if(is_black_left_dyn())  s |= LINE_LEFT;
+    if(is_black_right_dyn()) s |= LINE_RIGHT;
+    return s;
+}
+
+/*==============================================================================
+ * line_follow_step – reactive two-sensor follower
+ *   Directions swapped vs. P6: LEFT sensor on line -> turn LEFT (right wheel)
+ *==============================================================================*/
+static void line_follow_step(void){
+    switch(get_line_state_dyn()){
+        case LINE_BOTH:   MOTORS_FORWARD();    break;
+        case LINE_LEFT:   MOTOR_TURN_LEFT();   break;
+        case LINE_RIGHT:  MOTOR_TURN_RIGHT();  break;
+        default:          MOTORS_FORWARD();    break;
+    }
+}
+
+/*==============================================================================
+ * IoT message helpers
+ *==============================================================================*/
 static unsigned char ch_match(const char *s, const char *p, unsigned int n){
     unsigned int i;
     for(i = 0u; i < n; i++){ if(s[i] != p[i]){ return FALSE; } }
@@ -156,16 +420,12 @@ static unsigned int parse_uint(const char *s, unsigned int *consumed){
     return val;
 }
 
-/* parse +CWJAP:"ssid",... -------------------------------------------------- */
 static void parse_cwjap(const char *line){
     unsigned int i = 0u, j = 0u;
     char ssid_raw[11];
-
-    /* Scan to first '"' */
     while(line[i] != '\0' && line[i] != '"'){ i++; }
     if(line[i] == '\0'){ return; }
-    i++;   /* skip opening quote */
-
+    i++;
     while(line[i] != '"' && line[i] != '\0' && j < 10u){
         ssid_raw[j++] = line[i++];
     }
@@ -173,37 +433,29 @@ static void parse_cwjap(const char *line){
     if(j > 0u){ center_string(ssid_raw, j, ssid_display); }
 }
 
-/* parse +CIFSR:STAIP,"w.x.y.z" -------------------------------------------- */
 static void parse_cifsr(const char *line){
     unsigned int i = 0u, j = 0u, dot_count = 0u;
     char ip[16];
     char half1[8], half2[8];
     unsigned int h1len, h2len;
-
-    /* Must contain STAIP */
     while(line[i] != '\0'){
         if(ch_match(&line[i], "STAIP", 5u)){ break; }
         i++;
     }
     if(line[i] == '\0'){ return; }
-
-    /* Find opening quote */
     while(line[i] != '"' && line[i] != '\0'){ i++; }
     if(line[i] == '\0'){ return; }
     i++;
-
     while(line[i] != '"' && line[i] != '\0' && j < 15u){
         ip[j++] = line[i++];
     }
     ip[j] = '\0';
     if(j == 0u){ return; }
-
-    /* Split at second dot */
     for(i = 0u; i < j; i++){
         if(ip[i] == '.'){ dot_count++; }
         if(dot_count == 2u){
-            h1len = i;              /* "w.x"  */
-            h2len = j - i - 1u;    /* "y.z" (skip the dot at i) */
+            h1len = i;
+            h2len = j - i - 1u;
             if(h1len > 7u){ h1len = 7u; }
             if(h2len > 7u){ h2len = 7u; }
             strncpy(half1, ip,        h1len); half1[h1len] = '\0';
@@ -213,17 +465,28 @@ static void parse_cifsr(const char *line){
             return;
         }
     }
-    /* Fewer than 2 dots – whole IP on line 2 */
     center_string(ip, j, ip_oct12);
 }
 
-/* parse web command from +IPD payload ------------------------------------- */
+/*==============================================================================
+ * parse_web_command
+ *
+ * Supported commands after PIN (^1234):
+ *   F tttt  – forward  tttt × 500 ms
+ *   B tttt  – reverse  tttt × 500 ms
+ *   R tttt  – right    tttt × 500 ms
+ *   L tttt  – left     tttt × 500 ms
+ *   S 0     – stop immediately
+ *   P X     – arrived at pad X  (1-8)
+ *   G 0     – go autonomous (start BL sequence)
+ *   X 0     – exit circle   (trigger BL_EXIT)
+ *==============================================================================*/
+static unsigned char g_motor_direction  = 'S';
+static unsigned int  g_motor_remaining  = 0u;
+
 static void parse_web_command(const char *payload){
     unsigned int i = 0u, consumed = 0u, units = 0u;
     char dir;
-    char cmd_str[6];
-    char big_line[11];
-    unsigned int clen = 0u;
 
     /* Find '^' */
     while(payload[i] != '\0' && payload[i] != '^'){ i++; }
@@ -240,26 +503,81 @@ static void parse_web_command(const char *payload){
     dir   = payload[i++];
     units = parse_uint(&payload[i], &consumed);
 
-    /* Build display string e.g. "F 4" */
-    cmd_str[clen++] = dir;
-    cmd_str[clen++] = ' ';
-    if(units >= 10u){ cmd_str[clen++] = (char)('0' + units / 10u); }
-    cmd_str[clen++] = (char)('0' + units % 10u);
-    cmd_str[clen]   = '\0';
+    /* Build 5-char last-command display: "Dtttt" */
+    g_last_cmd[0] = dir;
+    g_last_cmd[1] = (units >= 1000u) ? (char)('0' + units/1000u) : ' ';
+    g_last_cmd[2] = (units >=  100u) ? (char)('0' + (units%1000u)/100u) : '0';
+    g_last_cmd[3] = (char)('0' + (units % 100u) / 10u);
+    g_last_cmd[4] = (char)('0' + units % 10u);
+    g_last_cmd[5] = '\0';
 
-    /* Show on enlarged middle line */
-    lcd_BIG_mid();
-    center_string(cmd_str, clen, big_line);
-    set_line(1, big_line);
-    Display_Update(0, 0, 0, 0);
+    /* Start seconds counter on first command */
+    if(!g_course_active){
+        g_course_active = TRUE;
+        g_course_secs   = 0u;
+        g_sec_ticks     = 0u;
+    }
+
+    switch(dir){
+        case 'F': case 'f':
+        case 'B': case 'b':
+        case 'R': case 'r':
+        case 'L': case 'l':
+            g_motor_direction = (unsigned char)dir;
+            g_motor_remaining = units;
+            g_on_pad = FALSE;
+            break;
+
+        case 'S': case 's':
+            MOTORS_ALL_OFF();
+            g_motor_remaining = 0u;
+            g_on_pad = FALSE;
+            break;
+
+        case 'P': case 'p':
+            /* Pad arrival: units holds pad number */
+            g_pad_number = (unsigned char)units;
+            g_on_pad     = TRUE;
+            break;
+
+        case 'G': case 'g':
+            /* Go autonomous – start BL sequence */
+            if(!g_autonomous){
+                g_autonomous = TRUE;
+                g_on_pad     = FALSE;
+                MOTORS_ALL_OFF();
+                g_bl_state  = BL_START;
+                g_bl_timer  = 0u;
+                g_lap_edges = 0u;
+                g_prev_right_black = is_black_right_dyn();
+                g_exit_requested   = FALSE;
+                g_exit_phase       = 0u;
+                set_line(0, "BL Start  ");
+                show_course_display();
+                Display_Update(0,0,0,0);
+                MOTORS_FORWARD();
+            }
+            break;
+
+        case 'X': case 'x':
+            /* Exit circle command */
+            if(g_autonomous && (g_bl_state == BL_CIRCLE || g_bl_state == BL_PAUSE3)){
+                g_exit_requested = TRUE;
+            }
+            break;
+
+        default:
+            break;
+    }
 
     UCA1_Transmit_String("CMD OK\r\n", 8u);
-
-    motor_direction       = (unsigned char)dir;
-    motor_units_remaining = units;
+    show_course_display();
+    Display_Update(0,0,0,0);
 }
 
-/* main dispatcher ---------------------------------------------------------- */
+/*==============================================================================
+ * process_iot_msg – parse one line from UCA0 ISR
+ *==============================================================================*/
 static void process_iot_msg(void){
     const char *msg = (const char *)iot_rx_msg;
     unsigned int k;
@@ -269,36 +587,30 @@ static void process_iot_msg(void){
     } else if(ch_match(msg, "+CIFSR:", 7u)){
         parse_cifsr(msg);
     } else if(ch_match(msg, "+IPD", 4u)){
-        /* Find ':' then pass the rest as payload */
         k = 0u;
         while(msg[k] != '\0' && msg[k] != ':'){ k++; }
         if(msg[k] == ':'){ parse_web_command(&msg[k + 1u]); }
     }
 
-    /* Clear flag and re-enable UCA0 RX */
     iot_msg_ready = FALSE;
     UCA0IE |= UCRXIE;
 }
 
 /*==============================================================================
- * process_fram_cmd
- * Handles single-char FRAM ^ commands from PC terminal.
+ * process_fram_cmd – handle PC backdoor ^ commands
  *==============================================================================*/
 static void process_fram_cmd(void){
     if(!fram_cmd_ready){ return; }
     fram_cmd_ready = FALSE;
-
     switch(fram_cmd_buf[0]){
-        case '^':
-            UCA1_Transmit_String("I'm here\r\n", 10u);
-            break;
+        case '^': UCA1_Transmit_String("I'm here\r\n", 10u); break;
         case 'F': case 'f':
             Set_Baud_UCA0(BAUD_115200);
-            UCA1_Transmit_String("115,200\r\n", 9u);
+            UCA1_Transmit_String("115200\r\n", 8u);
             break;
         case 'S': case 's':
             Set_Baud_UCA0(BAUD_9600);
-            UCA1_Transmit_String("9,600\r\n", 7u);
+            UCA1_Transmit_String("9600\r\n", 6u);
             break;
         default:
             UCA1_Transmit_String("?\r\n", 3u);
@@ -307,25 +619,224 @@ static void process_fram_cmd(void){
 }
 
 /*==============================================================================
- * execute_motor_unit  –  one TIME_UNIT_MS burst
+ * execute_motor_unit – one TIME_UNIT_MS burst of IoT motor motion
  *==============================================================================*/
 static void execute_motor_unit(void){
-    if(motor_units_remaining == 0u){ return; }
+    if(g_motor_remaining == 0u){ return; }
 
-    switch(motor_direction){
-        case 'F': case 'f': MOTOR_FORWARD(); break;
-        case 'B': case 'b': MOTOR_REVERSE(); break;
-        case 'R': case 'r': MOTOR_RIGHT();   break;
-        case 'L': case 'l': MOTOR_LEFT();    break;
-        default:            MOTORS_ALL_OFF(); break;
+    switch(g_motor_direction){
+        case 'F': case 'f': MOTORS_FORWARD();   break;
+        case 'B': case 'b': MOTORS_REVERSE();   break;
+        case 'R': case 'r': MOTOR_IOT_RIGHT();  break;
+        case 'L': case 'l': MOTOR_IOT_LEFT();   break;
+        default:            MOTORS_ALL_OFF();   break;
     }
 
     __delay_cycles((unsigned long)TIME_UNIT_MS * CYCLES_PER_MS);
-    motor_units_remaining--;
+    g_motor_remaining--;
 
-    if(motor_units_remaining == 0u){
+    if(g_motor_remaining == 0u){
         MOTORS_ALL_OFF();
-        display_ssid_ip();
+    }
+}
+
+/*==============================================================================
+ * bl_state_machine
+ *
+ * Called once per main loop pass when g_autonomous == TRUE.
+ * Uses update_display tick for timing.
+ * tick_consumed: TRUE when the current pass consumed a 200 ms tick.
+ *==============================================================================*/
+static void bl_state_machine(unsigned char tick_consumed){
+
+    switch(g_bl_state){
+
+        /*----------------------------------------------------------------------
+         * BL_START – drive forward until either sensor detects line
+         *--------------------------------------------------------------------*/
+        case BL_START:
+            if(get_line_state_dyn() != LINE_NONE){
+                MOTORS_ALL_OFF();
+                g_bl_state = BL_PAUSE1;
+                g_bl_timer = 0u;
+                set_line(0, "Intercept ");
+                show_course_display();
+                Display_Update(0,0,0,0);
+            }
+            break;
+
+        /*----------------------------------------------------------------------
+         * BL_PAUSE1 – 15 s mandatory stop, display "Intercept"
+         *--------------------------------------------------------------------*/
+        case BL_PAUSE1:
+            if(tick_consumed){ g_bl_timer++; }
+            if(g_bl_timer >= TICKS_15_SEC){
+                g_bl_timer = 0u;
+                g_bl_state = BL_TURN;
+                set_line(0, "BL Turn   ");
+                show_course_display();
+                Display_Update(0,0,0,0);
+                MOTOR_TURN_LEFT();    /* begin rotating to align */
+            }
+            break;
+
+        /*----------------------------------------------------------------------
+         * BL_TURN – rotate until BOTH sensors on black
+         *--------------------------------------------------------------------*/
+        case BL_TURN:
+            if(get_line_state_dyn() == LINE_BOTH){
+                MOTORS_ALL_OFF();
+                g_bl_state = BL_PAUSE2;
+                g_bl_timer = 0u;
+                /* Keep "BL Turn" on display during the pause */
+                show_course_display();
+                Display_Update(0,0,0,0);
+            } else {
+                if(tick_consumed){ g_bl_timer++; }
+                if(g_bl_timer >= TICKS_ALIGN_TIMEOUT){
+                    /* Safety: give up aligning, proceed anyway */
+                    MOTORS_ALL_OFF();
+                    g_bl_state = BL_PAUSE2;
+                    g_bl_timer = 0u;
+                    show_course_display();
+                    Display_Update(0,0,0,0);
+                }
+            }
+            break;
+
+        /*----------------------------------------------------------------------
+         * BL_PAUSE2 – 15 s stop after turn, display "BL Turn"
+         *--------------------------------------------------------------------*/
+        case BL_PAUSE2:
+            if(tick_consumed){ g_bl_timer++; }
+            if(g_bl_timer >= TICKS_15_SEC){
+                g_bl_timer = 0u;
+                g_bl_state = BL_TRAVEL;
+                set_line(0, "BL Travel ");
+                show_course_display();
+                Display_Update(0,0,0,0);
+                /* Start following – will naturally enter circle */
+            }
+            break;
+
+        /*----------------------------------------------------------------------
+         * BL_TRAVEL – follow line toward circle.
+         * Transition to BL_PAUSE3 when we detect we've entered the circle
+         * (simple heuristic: timer counts a fixed travel window then pauses).
+         * Using a lap-entry edge: once the right sensor crosses white->black
+         * once while moving, we consider the circle entered.
+         *--------------------------------------------------------------------*/
+        case BL_TRAVEL:
+            line_follow_step();
+            if(tick_consumed){ g_bl_timer++; }
+            {
+                unsigned char cur = is_black_right_dyn();
+                if((cur == TRUE) && (g_prev_right_black == FALSE)){
+                    /* First rising edge after travel start = circle entry */
+                    g_lap_edges++;
+                }
+                g_prev_right_black = cur;
+            }
+            /* Enter pause when first edge seen OR after 60-tick (12s) safety */
+            if(g_lap_edges >= 1u || g_bl_timer >= 60u){
+                MOTORS_ALL_OFF();
+                g_bl_state  = BL_PAUSE3;
+                g_bl_timer  = 0u;
+                g_lap_edges = 0u;
+                g_prev_right_black = is_black_right_dyn();
+                set_line(0, "BL Circle ");
+                show_course_display();
+                Display_Update(0,0,0,0);
+            }
+            break;
+
+        /*----------------------------------------------------------------------
+         * BL_PAUSE3 – 15 s stop to display "BL Circle" before full lap
+         *--------------------------------------------------------------------*/
+        case BL_PAUSE3:
+            if(tick_consumed){ g_bl_timer++; }
+            /* Allow exit command during pause */
+            if(g_exit_requested){
+                g_exit_requested = FALSE;
+                g_bl_state  = BL_EXIT;
+                g_bl_timer  = 0u;
+                g_exit_phase = 0u;
+                set_line(0, "BL Exit   ");
+                show_course_display();
+                Display_Update(0,0,0,0);
+                MOTOR_EXIT_TURN();
+                break;
+            }
+            if(g_bl_timer >= TICKS_15_SEC){
+                g_bl_timer  = 0u;
+                g_bl_state  = BL_CIRCLE;
+                g_lap_edges = 0u;
+                g_prev_right_black = is_black_right_dyn();
+                /* Already showing "BL Circle" – continue following */
+            }
+            break;
+
+        /*----------------------------------------------------------------------
+         * BL_CIRCLE – follow circle, count laps
+         *--------------------------------------------------------------------*/
+        case BL_CIRCLE:
+            line_follow_step();
+            {
+                unsigned char cur = is_black_right_dyn();
+                if((cur == TRUE) && (g_prev_right_black == FALSE)){
+                    g_lap_edges++;
+                }
+                g_prev_right_black = cur;
+            }
+            /* Check for exit command (set by parse_web_command) */
+            if(g_exit_requested && g_lap_edges >= LAP_EDGE_COUNT){
+                g_exit_requested = FALSE;
+                MOTORS_ALL_OFF();
+                g_bl_state   = BL_EXIT;
+                g_bl_timer   = 0u;
+                g_exit_phase = 0u;
+                set_line(0, "BL Exit   ");
+                show_course_display();
+                Display_Update(0,0,0,0);
+                MOTOR_EXIT_TURN();
+            }
+            break;
+
+        /*----------------------------------------------------------------------
+         * BL_EXIT – turn then drive straight > 2 feet
+         *   Phase 0: spin away from circle for TICKS_EXIT_TURN
+         *   Phase 1: drive straight for TICKS_EXIT_DRIVE then stop
+         *--------------------------------------------------------------------*/
+        case BL_EXIT:
+            if(tick_consumed){ g_bl_timer++; }
+            if(g_exit_phase == 0u){
+                if(g_bl_timer >= TICKS_EXIT_TURN){
+                    g_exit_phase = 1u;
+                    g_bl_timer   = 0u;
+                    MOTORS_FORWARD();
+                }
+            } else {
+                if(g_bl_timer >= TICKS_EXIT_DRIVE){
+                    MOTORS_ALL_OFF();
+                    g_bl_state = BL_STOP;
+                    g_bl_timer = 0u;
+                    show_bl_stop_display();
+                }
+            }
+            break;
+
+        /*----------------------------------------------------------------------
+         * BL_STOP – course complete, display final screen; stay here
+         *--------------------------------------------------------------------*/
+        case BL_STOP:
+            /* Motors off, nothing more to do */
+            IR_LED_control(IR_LED_OFF);
+            break;
+
+        default:
+            MOTORS_ALL_OFF();
+            g_bl_state = BL_NONE;
+            break;
     }
 }
 
@@ -333,29 +844,75 @@ static void execute_motor_unit(void){
  * main
  *==============================================================================*/
 void main(void){
+    unsigned char tick_200ms = FALSE;
+    unsigned int  state_timer = 0u;
 
-    unsigned char state       = STATE_SPLASH;
-    unsigned int  state_timer = RESET_STATE;
-    unsigned char tick_200ms  = FALSE;
-
+    /* ── Unlock GPIO ── */
     PM5CTL0 &= ~LOCKLPM5;
 
+    /* ── Hardware init ── */
     Init_Ports();
     Init_Clocks();
     Init_Conditions();
     Init_Timers();
     Init_LCD();
+    Init_ADC();
+    Init_Timer_B1();
 
     MOTORS_ALL_OFF();
+    IR_LED_control(IR_LED_OFF);
 
+    /* ── Serial (IOT + PC backdoor) ── */
     Init_Serial_UCA0(BAUD_115200);
     Init_Serial_UCA1(BAUD_115200);
 
+    /* ── Splash ── */
     set_line(0, "ECE306    ");
-    set_line(1, "NCSU  P9  ");
-    set_line(2, "Kachow    ");
+    set_line(1, "NCSU P10  ");
+    set_line(2, "Kachow!   ");
     set_line(3, "Port:6767 ");
-    Display_Update(0, 0, 0, 0);
+    Display_Update(0,0,0,0);
+
+    /* ── IOT init ── */
+    state_timer = 0u;
+    /* Wait ~5 s splash */
+    while(state_timer < SPLASH_TICKS){
+        if(update_display_count > 0u){
+            update_display_count--;
+            update_display = TRUE;
+            state_timer++;
+        }
+        Display_Process();
+    }
+
+    set_line(0, "Init IOT  ");
+    set_line(1, "          ");
+    set_line(2, "          ");
+    set_line(3, "          ");
+    Display_Update(0,0,0,0);
+
+    Init_IOT();
+
+    /* Query SSID + IP */
+    state_timer = 0u;
+    while(state_timer < 50u){
+        if(update_display_count > 0u){
+            update_display_count--;
+            update_display = TRUE;
+            state_timer++;
+        }
+        Display_Process();
+        if(iot_msg_ready){ process_iot_msg(); }
+        if(state_timer == 5u){  UCA0_Transmit_String("AT+CWJAP?\r\n", 11u); }
+        if(state_timer == 30u){ UCA0_Transmit_String("AT+CIFSR\r\n",  10u); }
+        if(ssid_display[5] != ' ' && ip_oct12[5] != ' '){ break; }
+    }
+
+    /* ── Calibration ── */
+    run_calibration();
+
+    /* ── Show "Waiting for input" ── */
+    show_waiting_display();
 
     /*==========================================================================
      * Main loop
@@ -370,14 +927,21 @@ void main(void){
             update_display_count--;
             update_display = TRUE;
             tick_200ms     = TRUE;
+
+            /* Seconds counter (only while course active) */
+            if(g_course_active && g_bl_state != BL_STOP){
+                g_sec_ticks++;
+                if(g_sec_ticks >= 5u){   /* 5 × 200 ms = 1 s */
+                    g_sec_ticks = 0u;
+                    if(g_course_secs < 999u){ g_course_secs++; }
+                }
+            }
         }
 
         Display_Process();
 
         /*----------------------------------------------------------------------
          * IOT message handler
-         * iot_msg_ready set by UCA0 ISR when \r received.
-         * process_iot_msg() handles it then re-enables UCA0 RX.
          *--------------------------------------------------------------------*/
         if(iot_msg_ready){
             process_iot_msg();
@@ -389,104 +953,30 @@ void main(void){
         process_fram_cmd();
 
         /*----------------------------------------------------------------------
-         * State machine
+         * Autonomous BL state machine
          *--------------------------------------------------------------------*/
-        switch(state){
+        if(g_autonomous){
+            bl_state_machine(tick_200ms);
 
+            /* Refresh course display every tick during autonomous phases */
+            if(tick_200ms && g_bl_state != BL_STOP){
+                show_course_display();
+                Display_Update(0,0,0,0);
+            }
+
+        } else {
             /*------------------------------------------------------------------
-             * SPLASH – 5 s
+             * IoT remote-control mode: execute queued motor unit
              *----------------------------------------------------------------*/
-            case STATE_SPLASH:
-                if(tick_200ms){ state_timer++; }
-                if(state_timer >= SPLASH_TICKS){
-                    state_timer = RESET_STATE;
-                    sw1_pressed = FALSE;
-                    sw2_pressed = FALSE;
-                    set_line(0, "Init IOT  ");
-                    set_line(1, "          ");
-                    set_line(2, "          ");
-                    set_line(3, "          ");
-                    Display_Update(0, 0, 0, 0);
-                    state = STATE_IOT_INIT;
-                }
-                break;
-
-            /*------------------------------------------------------------------
-             * IOT_INIT
-             *   Init_IOT() is blocking – it resets the module, sends AT
-             *   commands, and queries CWJAP + CIFSR.  Responses arrive in
-             *   UCA0 ISR and are parsed when iot_msg_ready fires above.
-             *   After Init_IOT() returns we go straight to ACTIVE; the
-             *   SSID/IP display will fill in as the last IOT responses arrive.
-             *----------------------------------------------------------------*/
-            // In main.c switch(state)
-            case STATE_IOT_INIT:
-                Init_IOT();
-                state_timer = 0; // Reuse timer for query pacing
-                state = STATE_IOT_QUERY;
-                break;
-
-            case STATE_IOT_QUERY:
-                // Every 2 seconds (10 ticks), send a query until we have data
-                if(tick_200ms){ state_timer++; }
-
-                if(state_timer == 5){
-                    UCA0_Transmit_String("AT+CWJAP?\r\n", 11u);
-                }
-                if(state_timer == 30){
-                    UCA0_Transmit_String("AT+CIFSR\r\n", 10u);
-                }
-
-                // If we successfully grabbed both, move to active
-                // You can check if the first char of your display strings isn't a space
-                if(ssid_display[5] != ' ' && ip_oct12[5] != ' '){
-                    display_ssid_ip();
-                    state = STATE_ACTIVE;
-                }
-
-                // Safety timeout: move to active after 10 seconds anyway
-                if(state_timer > 50){
-                    display_ssid_ip();
-                    state = STATE_ACTIVE;
-                }
-                break;
-            /*------------------------------------------------------------------
-             * ACTIVE
-             *   SW1 -> IOT baud 115,200
-             *   SW2 -> IOT baud   9,600
-             *   motor_units_remaining set by parse_web_command -> STATE_MOTOR
-             *----------------------------------------------------------------*/
-            case STATE_ACTIVE:
-                if(sw1_pressed){
-                    sw1_pressed = FALSE;
-                    Set_Baud_UCA0(BAUD_115200);
-                    UCA1_Transmit_String("IOT->115200\r\n", 13u);
-                }
-                if(sw2_pressed){
-                    sw2_pressed = FALSE;
-                    Set_Baud_UCA0(BAUD_9600);
-                    UCA1_Transmit_String("IOT->9600\r\n", 11u);
-                }
-                if(motor_units_remaining > 0u){
-                    state = STATE_MOTOR;
-                }
-                break;
-
-            /*------------------------------------------------------------------
-             * STATE_MOTOR
-             *   One TIME_UNIT_MS burst per loop pass.
-             *   execute_motor_unit() stops motors and restores LCD when done.
-             *----------------------------------------------------------------*/
-            case STATE_MOTOR:
+            if(g_motor_remaining > 0u){
                 execute_motor_unit();
-                if(motor_units_remaining == 0u){
-                    state = STATE_ACTIVE;
-                }
-                break;
+            }
 
-            default:
-                state = STATE_ACTIVE;
-                break;
+            /* Refresh display every tick */
+            if(tick_200ms && g_course_active){
+                show_course_display();
+                Display_Update(0,0,0,0);
+            }
         }
 
     } /* while(ALWAYS) */
