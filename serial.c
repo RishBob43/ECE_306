@@ -41,10 +41,12 @@ volatile char          UCA1_Char_Rx[SERIAL_RING_SIZE];
 /*------------------------------------------------------------------------------
  * IOT message buffer  (one AT response line, CR-terminated)
  *------------------------------------------------------------------------------*/
-volatile char          iot_rx_msg[IOT_MSG_SIZE];
-volatile unsigned char iot_msg_ready  = FALSE;
-volatile unsigned int  iot_rx_count   = 0u;
-
+/* Replace the old single-buffer globals with these */
+volatile char          iot_rx_msg[IOT_MSG_COUNT][IOT_MSG_SIZE];
+volatile unsigned char iot_msg_ready[IOT_MSG_COUNT]  = {FALSE, FALSE};
+volatile unsigned char iot_rx_write_idx = 0u;
+volatile unsigned char iot_rx_read_idx  = 0u;
+volatile unsigned int  iot_rx_count     = 0u;
 /*------------------------------------------------------------------------------
  * PC ready flag and FRAM ^ command parser state
  *------------------------------------------------------------------------------*/
@@ -92,14 +94,22 @@ static void apply_baud_registers(unsigned char baud,
  * Init_Serial_UCA0  (IOT side, J9)
  *==============================================================================*/
 void Init_Serial_UCA0(unsigned char baud){
-    unsigned int i;
+    unsigned int i, j;
+    for(i = 0u; i < IOT_MSG_COUNT; i++){
+        for(j = 0u; j < IOT_MSG_SIZE; j++){
+            iot_rx_msg[i][j] = 0u;
+        }
+        iot_msg_ready[i] = FALSE;
+    }
+    iot_rx_write_idx = 0u;
+    iot_rx_read_idx  = 0u;
+    iot_rx_count     = 0u;
+
     for(i = SERIAL_BEGINNING; i < SERIAL_RING_SIZE; i++){
         UCA0_Char_Rx[i] = 0x00;
     }
-    uca0_rx_wr    = SERIAL_BEGINNING;
-    uca0_rx_rd    = SERIAL_BEGINNING;
-    iot_rx_count  = 0u;
-    iot_msg_ready = FALSE;
+    uca0_rx_wr = SERIAL_BEGINNING;
+    uca0_rx_rd = SERIAL_BEGINNING;
 
     UCA0CTLW0  = RESET_STATE;
     UCA0CTLW0 |= UCSWRST;
@@ -292,50 +302,47 @@ __interrupt void eUSCI_A1_ISR(void){
     }
 }
 
-/*==============================================================================
- * EUSCI_A0_VECTOR  –  UCA0 ISR  (IOT port, J9)
- *
- * Collects one line from the IOT into iot_rx_msg[]:
- *   \r  -> null-terminate, set iot_msg_ready, disable RX interrupt
- *   \n  -> ignore
- *   printable -> store if room
- *
- * Forwards every character to PC (UCA1) if pc_ready is TRUE.
- *==============================================================================*/
 #pragma vector = EUSCI_A0_VECTOR
 __interrupt void eUSCI_A0_ISR(void){
     char rx_char;
+    unsigned char widx;
 
     switch(__even_in_range(UCA0IV, 0x08)){
-
-        case 0:
-            break;
+        case 0: break;
 
         case 2:   /* RXIFG */
             rx_char = (char)UCA0RXBUF;
 
+            widx = iot_rx_write_idx;
+
             if(rx_char == '\r'){
-                iot_rx_msg[iot_rx_count] = '\0';  /* terminate line           */
-                iot_rx_count  = 0u;
-                iot_msg_ready = TRUE;
-                UCA0IE &= ~UCRXIE;                /* disable until main clears */
+                /* terminate current line */
+                iot_rx_msg[widx][iot_rx_count] = '\0';
+                iot_rx_count = 0u;
+
+                if(!iot_msg_ready[widx]){
+                    /* mark this slot ready */
+                    iot_msg_ready[widx] = TRUE;
+                    /* advance write index to next slot, wrapping */
+                    iot_rx_write_idx = (unsigned char)((widx + 1u) % IOT_MSG_COUNT);
+                }
+                /* if next slot is also ready (overrun), stay on current –
+                   foreground needs to drain faster, but we don't lose data */
+
             } else if(rx_char == '\n'){
                 /* ignore LF */
             } else if(rx_char >= 0x20 && iot_rx_count < (IOT_MSG_SIZE - 1u)){
-                iot_rx_msg[iot_rx_count++] = rx_char;
+                iot_rx_msg[widx][iot_rx_count++] = rx_char;
             }
 
-            /* Forward to PC if ready */
+            /* Always forward to PC */
             if(pc_ready){
                 while(!(UCA1IFG & UCTXIFG));
                 UCA1TXBUF = (unsigned char)rx_char;
             }
             break;
 
-        case 4:
-            break;
-
-        default:
-            break;
+        case 4: break;
+        default: break;
     }
 }

@@ -40,10 +40,14 @@
 #define RX_DISPLAY_LEN          (10u)
 #define SPLASH_TICKS            (25u)   /* 5 s  @ 200 ms per tick             */
 
-/*------------------------------------------------------------------------------
- * IOT message buffer size (one AT response line)
- *------------------------------------------------------------------------------*/
 #define IOT_MSG_SIZE            (64u)
+#define IOT_MSG_COUNT           (2u)   /* double buffer */
+
+extern volatile char          iot_rx_msg[IOT_MSG_COUNT][IOT_MSG_SIZE];
+extern volatile unsigned char iot_msg_ready[IOT_MSG_COUNT];
+extern volatile unsigned char iot_rx_write_idx;  /* ISR writes to this slot  */
+extern volatile unsigned char iot_rx_read_idx;   /* foreground reads this     */
+extern volatile unsigned int  iot_rx_count;
 
 /*------------------------------------------------------------------------------
  * FRAM ^ command buffer size
@@ -62,11 +66,6 @@ extern volatile char          UCA0_Char_Rx[SERIAL_RING_SIZE];
 extern volatile unsigned int  uca1_rx_wr;
 extern volatile unsigned int  uca1_rx_rd;
 extern volatile char          UCA1_Char_Rx[SERIAL_RING_SIZE];
-
-/* IOT message buffer – filled by UCA0 ISR, one line at a time */
-extern volatile char          iot_rx_msg[IOT_MSG_SIZE];
-extern volatile unsigned char iot_msg_ready;    /* set when \r received       */
-extern volatile unsigned int  iot_rx_count;
 
 /* PC ready flag – set TRUE when first char received from PC                  */
 extern volatile unsigned char pc_ready;

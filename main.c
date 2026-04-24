@@ -563,24 +563,21 @@ static void parse_cwjap(const char *line){
 }
 
 static void parse_cifsr(const char *line){
-    unsigned int i = 0u, j = 0u;
+    unsigned int i = 0u, j = 0u, dot_count = 0u;
     char ip[16];
-    char half1[11], half2[11];
-    unsigned int h1len, h2len, split;
+    char half1[8], half2[8];
+    unsigned int h1len, h2len;
 
-    /* Find STAIP specifically, skip STAMAC lines */
-    i = 0u;
     while(line[i] != '\0'){
-        if(ch_match(&line[i], "STAIP,", 6u)){ break; }
+        if(ch_match(&line[i], "STAIP", 5u)){ break; }
         i++;
     }
-    if(line[i] == '\0'){ return; }    /* not a STAIP line */
-    i += 6u;                          /* skip past "STAIP," */
+    if(line[i] == '\0'){ return; }
 
-    /* Skip opening quote */
-    if(line[i] == '"'){ i++; }
+    while(line[i] != '"' && line[i] != '\0'){ i++; }
+    if(line[i] == '\0'){ return; }
+    i++;
 
-    /* Copy IP digits until closing quote or end */
     j = 0u;
     while(line[i] != '"' && line[i] != '\0' && j < 15u){
         ip[j++] = line[i++];
@@ -588,41 +585,21 @@ static void parse_cifsr(const char *line){
     ip[j] = '\0';
     if(j == 0u){ return; }
 
-    /* Find the second dot to split into two display halves:
-     *   "192.168.1.216" -> half1="192.168" half2="1.216"
-     *   We want octet1.octet2 on line 1 and octet3.octet4 on line 2.
-     * Walk forward counting dots; split after the second dot's position. */
-    split = 0u;
-    {
-        unsigned int dot_count = 0u;
-        for(i = 0u; i < j; i++){
-            if(ip[i] == '.'){
-                dot_count++;
-                if(dot_count == 2u){
-                    split = i;   /* index of the second dot */
-                    break;
-                }
-            }
+    for(i = 0u; i < j; i++){
+        if(ip[i] == '.'){ dot_count++; }
+        if(dot_count == 2u){
+            h1len = i;
+            h2len = j - i - 1u;
+            if(h1len > 7u){ h1len = 7u; }
+            if(h2len > 7u){ h2len = 7u; }
+            strncpy(half1, ip,        h1len); half1[h1len] = '\0';
+            strncpy(half2, &ip[i+1u], h2len); half2[h2len] = '\0';
+            center_string(half1, h1len, ip_oct12);
+            center_string(half2, h2len, ip_oct34);
+            return;
         }
-        if(dot_count < 2u){ split = j; }  /* fallback: whole IP on line 1 */
     }
-
-    /* half1 = everything before the second dot (e.g. "192.168") */
-    h1len = split;
-    if(h1len > 10u){ h1len = 10u; }
-    strncpy(half1, ip, h1len);
-    half1[h1len] = '\0';
-
-    /* half2 = everything after the second dot (e.g. "1.216") */
-    h2len = (split < j) ? (j - split - 1u) : 0u;
-    if(h2len > 10u){ h2len = 10u; }
-    if(h2len > 0u){
-        strncpy(half2, &ip[split + 1u], h2len);
-    }
-    half2[h2len] = '\0';
-
-    center_string(half1, h1len, ip_oct12);
-    center_string(half2, h2len, ip_oct34);
+    center_string(ip, j, ip_oct12);
 }
 /*==============================================================================
  * parse_web_command
@@ -735,16 +712,19 @@ static void parse_web_command(const char *payload){
     Display_Update(0,0,0,0);
 }
 
-/*==============================================================================
- * process_iot_msg – parse one line from UCA0 ISR
- *==============================================================================*/
 static void process_iot_msg(void){
-    const char *msg = (const char *)iot_rx_msg;
+    unsigned char ridx = iot_rx_read_idx;
+    const char *msg;
     unsigned int k;
+
+    /* nothing ready */
+    if(!iot_msg_ready[ridx]){ return; }
+
+    msg = (const char *)iot_rx_msg[ridx];
 
     if(ch_match(msg, "+CWJAP:", 7u)){
         parse_cwjap(msg);
-    } else if(ch_match(msg, "+CIFSR:STAIP", 12u)){
+    } else if(ch_match(msg, "+CIFSR:", 7u)){
         parse_cifsr(msg);
     } else if(ch_match(msg, "+IPD", 4u)){
         k = 0u;
@@ -752,10 +732,11 @@ static void process_iot_msg(void){
         if(msg[k] == ':'){ parse_web_command(&msg[k + 1u]); }
     }
 
-    iot_msg_ready = FALSE;
-    UCA0IE |= UCRXIE;
+    /* mark slot consumed and advance read index */
+    iot_msg_ready[ridx] = FALSE;
+    iot_rx_read_idx = (unsigned char)((ridx + 1u) % IOT_MSG_COUNT);
+    /* no need to disable/re-enable UCA0 RX – ISR runs freely now */
 }
-
 /*==============================================================================
  * process_fram_cmd – handle PC backdoor ^ commands
  *==============================================================================*/
@@ -782,21 +763,26 @@ static void process_fram_cmd(void){
  * execute_motor_unit – one TIME_UNIT_MS burst of IoT motor motion
  *==============================================================================*/
 static void execute_motor_unit(void){
-    if(g_motor_remaining == 0u){ return; }
-
-    switch(g_motor_direction){
-        case 'F': case 'f': MOTORS_FORWARD();   break;
-        case 'B': case 'b': MOTORS_REVERSE();   break;
-        case 'R': case 'r': MOTOR_IOT_RIGHT();  break;
-        case 'L': case 'l': MOTOR_IOT_LEFT();   break;
-        default:            MOTORS_ALL_OFF();   break;
-    }
-
-    __delay_cycles((unsigned long)TIME_UNIT_MS * CYCLES_PER_MS);
-    g_motor_remaining--;
-
     if(g_motor_remaining == 0u){
         MOTORS_ALL_OFF();
+        return;
+    }
+
+    /* Apply direction every pass so motor stays on between ticks */
+    switch(g_motor_direction){
+        case 'F': case 'f': MOTORS_FORWARD();    break;
+        case 'B': case 'b': MOTORS_REVERSE();    break;
+        case 'R': case 'r': MOTOR_IOT_RIGHT();   break;
+        case 'L': case 'l': MOTOR_IOT_LEFT();    break;
+        default:            MOTORS_ALL_OFF();    break;
+    }
+
+    /* Each unit = 1 tick = 200 ms – only decrement on tick */
+    if(tick_200ms){
+        g_motor_remaining--;
+        if(g_motor_remaining == 0u){
+            MOTORS_ALL_OFF();
+        }
     }
 }
 
@@ -1069,20 +1055,31 @@ void main(void){
 
     Init_IOT();
 
-    /* Query SSID + IP */
-    state_timer = 0u;
-    while(state_timer < 50u){
-        if(update_display_count > 0u){
-            update_display_count--;
-            update_display = TRUE;
-            state_timer++;
-        }
-        Display_Process();
-        if(iot_msg_ready){ process_iot_msg(); }
-        if(state_timer == 5u){  UCA0_Transmit_String("AT+CWJAP?\r\n", 11u); }
-        if(state_timer == 30u){ UCA0_Transmit_String("AT+CIFSR\r\n",  10u); }
-    }
+    /* ── Query SSID + IP ── */
+    {
+        unsigned int  iot_timer  = 0u;
 
+        while(iot_timer < 150u){   /* 30 s max – ESP8266 needs time to connect */
+            if(update_display_count > 0u){
+                update_display_count--;
+                update_display = TRUE;
+                iot_timer++;
+            }
+            Display_Process();
+
+            while(iot_msg_ready[iot_rx_read_idx]){
+                process_iot_msg();
+            }
+
+            /* Send CIFSR later to give ESP8266 time to get an IP */
+            if(iot_timer >= 40u){
+                UCA0_Transmit_String("AT+CIFSR\r\n", 10u);
+
+            }
+            if(ip_oct12[0] != ' '){ break; }
+
+        }
+    }
     /* ── Calibration ── */
     run_calibration();
 
@@ -1118,9 +1115,10 @@ void main(void){
         /*----------------------------------------------------------------------
          * IOT message handler
          *--------------------------------------------------------------------*/
-        if(iot_msg_ready){
-            process_iot_msg();
-        }
+        /* drain all pending messages each pass */
+            while(iot_msg_ready[iot_rx_read_idx]){
+                process_iot_msg();
+            }
 
         /*----------------------------------------------------------------------
          * FRAM ^ command handler
