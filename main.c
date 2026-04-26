@@ -100,7 +100,7 @@ extern volatile unsigned char display_changed;
 /*==============================================================================
  * IoT / motor timing
  *==============================================================================*/
-#define TIME_UNIT_MS            (500u)    /* each 'tttt' unit = 500 ms           */
+#define TIME_UNIT_TICKS         (1u)      /*         */
 
 
 /*==============================================================================
@@ -202,7 +202,7 @@ static unsigned int   g_sec_ticks      = 0u;     /* ticks toward next second    
 static char           g_last_cmd[6]    = "     "; /* 5 relevant chars + null       */
 static unsigned char  g_autonomous     = FALSE;  /* TRUE when G command received   */
 static unsigned char  g_cal_done       = FALSE;
-
+static unsigned char tick_200ms = FALSE;
 /*==============================================================================
  * Helper: center_string – write text centered into a 10-char buffer
  *==============================================================================*/
@@ -663,8 +663,17 @@ static void parse_web_command(const char *payload){
 
         case 'S': case 's':
             MOTORS_ALL_OFF();
+            g_motor_direction = 'S';
             g_motor_remaining = 0u;
             g_on_pad = FALSE;
+            break;
+
+        case 'V': case 'v':
+            /* DAC voltage: units holds the raw DAC register value
+             * e.g. ^1234V875 -> DAC_Set(875) ~ 6.2 V              */
+            if(units >= DAC_MIN_VALUE && units <= DAC_MAX_VALUE){
+                DAC_Set((unsigned int)units);
+            }
             break;
 
         case 'P': case 'p':
@@ -759,25 +768,21 @@ static void process_fram_cmd(void){
     }
 }
 
-/*==============================================================================
- * execute_motor_unit – one TIME_UNIT_MS burst of IoT motor motion
- *==============================================================================*/
 static void execute_motor_unit(void){
-    if(g_motor_remaining == 0u){
+    if(g_motor_remaining == 0u || g_motor_direction == 'S'){
         MOTORS_ALL_OFF();
+        g_motor_remaining = 0u;
         return;
     }
 
-    /* Apply direction every pass so motor stays on between ticks */
     switch(g_motor_direction){
         case 'F': case 'f': MOTORS_FORWARD();    break;
         case 'B': case 'b': MOTORS_REVERSE();    break;
-        case 'R': case 'r': MOTOR_IOT_RIGHT();   break;
-        case 'L': case 'l': MOTOR_IOT_LEFT();    break;
+        case 'R': case 'r': MOTOR_TURN_RIGHT();   break;
+        case 'L': case 'l': MOTOR_TURN_LEFT();    break;
         default:            MOTORS_ALL_OFF();    break;
     }
 
-    /* Each unit = 1 tick = 200 ms – only decrement on tick */
     if(tick_200ms){
         g_motor_remaining--;
         if(g_motor_remaining == 0u){
@@ -997,7 +1002,6 @@ static void bl_state_machine(unsigned char tick_consumed){
  * main
  *==============================================================================*/
 void main(void){
-    unsigned char tick_200ms = FALSE;
     unsigned int  state_timer = 0u;
 
     /* ── Unlock GPIO ── */
@@ -1059,7 +1063,7 @@ void main(void){
     {
         unsigned int  iot_timer  = 0u;
 
-        while(iot_timer < 150u){   /* 30 s max – ESP8266 needs time to connect */
+        while(iot_timer < 50u){   /* 30 s max – ESP8266 needs time to connect */
             if(update_display_count > 0u){
                 update_display_count--;
                 update_display = TRUE;
@@ -1072,7 +1076,7 @@ void main(void){
             }
 
             /* Send CIFSR later to give ESP8266 time to get an IP */
-            if(iot_timer >= 40u){
+            if(iot_timer >= 5u){
                 UCA0_Transmit_String("AT+CIFSR\r\n", 10u);
 
             }

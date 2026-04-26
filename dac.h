@@ -44,8 +44,8 @@
 #define DAC_LIMIT               (850u)   /* ~6.08 V – full speed ceiling        */
 #define DAC_ADJUST              (DAC_LIMIT) /* Settle point after ramp completes */
 #define DAC_RAMP_STEP           (100u)   /* Decrement per TB0 overflow tick     */
-#define DAC_MAX_VALUE           (4095u)  /* 12-bit ceiling                      */
-#define DAC_MIN_VALUE           (0u)     /* 12-bit floor                        */
+#define DAC_MAX_VALUE           (4095u)  /*                     */
+#define DAC_MIN_VALUE           (700u)     /* 12-bit floor                        */
 
 /*------------------------------------------------------------------------------
  * Motor PWM base speed and PID limits (used by line_follow_pid in main.c)
