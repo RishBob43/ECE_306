@@ -5,49 +5,42 @@
  * Description: Project 10 – WiFi-controlled IoT course + autonomous black-line
  *              circle follower.
  *
+ * Changes from base:
+ *   1. Calibration is now gated by SW1 press:
+ *        After IOT init the screen shows "Press SW1 / to Calibrate".
+ *        The MCU waits (polling IOT messages) until sw1_pressed goes TRUE,
+ *        then runs run_calibration() and shows "Waiting for input".
+ *
+ *   2. New autonomous pre-movement phase (BL_PRE_MOVE):
+ *        When the ^1234G command is received the car first drives FORWARD
+ *        for 2 seconds (10 ticks × 200 ms), then turns RIGHT for ~1 second
+ *        (5 ticks), and only then enters BL_START (line intercept forward).
+ *
  * ── IoT Course (Phase 1) ────────────────────────────────────────────────────
- *   Startup:  Auto-connect, display SSID + IP -> calibrate -> "Waiting for input"
+ *   Startup:  Auto-connect, display SSID + IP -> "Press SW1" -> calibrate
+ *             -> "Waiting for input"
  *   Course:   Drive to pads 1-8 via web commands; display "Arrived 0X" on pad.
  *             First command starts a seconds counter displayed on line 3.
  *
  *   Web command format (via TCP port 6767):
  *     ^1234Dtttt   D = F/B/R/L/S/A/E  tttt = time units (500 ms each)
  *     ^1234PX      Pad arrival: X = 1-8, displays "Arrived 0X"
- *     ^1234G       Go autonomous (triggers BL state machine)
+ *     ^1234G       Go autonomous (triggers BL_PRE_MOVE then BL state machine)
  *     ^1234X       Exit circle (triggers BL_EXIT)
  *
  * ── Autonomous Phase (Phase 2) ──────────────────────────────────────────────
  *   State machine with mandatory 10-20 s stops between stages:
  *
- *     BL_START   -> drive forward toward line        display "BL Start  "
- *     BL_PAUSE1  -> 15 s stop after intercept        display "Intercept "
- *     BL_TURN    -> rotate until both on black       display "BL Turn   "
- *     BL_PAUSE2  -> 15 s stop after turn             display "BL Turn   "
- *     BL_TRAVEL  -> follow line to circle            display "BL Travel "
- *     BL_PAUSE3  -> 15 s stop (within first lap)     display "BL Circle "
- *     BL_CIRCLE  -> follow line, count 2 laps        display "BL Circle "
- *     BL_EXIT    -> commanded exit: turn + straight  display "BL Exit   "
- *     BL_STOP    -> stopped, display completion      display "BL Stop   "
- *
- * ── Display Layout ───────────────────────────────────────────────────────────
- *   IoT mode:
- *     Line 0: "Arrived 0X" or blank / BL status in autonomous
- *     Line 1: IP octet 1-2   (e.g. " 10.155  ")
- *     Line 2: IP octet 3-4   (e.g. " .102.202")
- *     Line 3: "Dcmd  NNNs" – last cmd char + seconds counter
- *
- *   BL_STOP final screen:
- *     Line 0: "BL Stop   "
- *     Line 1: "Kachow!   "   (custom completion message)
- *     Line 2: "Good job! "
- *     Line 3: "Time:NNNs "
- *
- * ── Calibration Display ──────────────────────────────────────────────────────
- *   After calibration completes:
- *     Line 0: "Waiting   "
- *     Line 1: "for input "
- *     Line 2: ip_oct12
- *     Line 3: ip_oct34
+ *     BL_PRE_MOVE -> forward 2 s then right turn ~1 s   display "BL PreMove"
+ *     BL_START    -> drive forward toward line           display "BL Start  "
+ *     BL_PAUSE1   -> 15 s stop after intercept           display "Intercept "
+ *     BL_TURN     -> rotate until both on black          display "BL Turn   "
+ *     BL_PAUSE2   -> 15 s stop after turn                display "BL Turn   "
+ *     BL_TRAVEL   -> follow line to circle               display "BL Travel "
+ *     BL_PAUSE3   -> 15 s stop (within first lap)        display "BL Circle "
+ *     BL_CIRCLE   -> follow line, count 2 laps           display "BL Circle "
+ *     BL_EXIT     -> commanded exit: turn + straight     display "BL Exit   "
+ *     BL_STOP     -> stopped, display completion         display "BL Stop   "
  *
  *------------------------------------------------------------------------------*/
 
@@ -75,7 +68,47 @@ extern volatile unsigned int  update_display_count;
 extern volatile unsigned char display_changed;
 
 /*==============================================================================
- * Motor GPIO macros
+ * PWM line-follow speed constants  (TB3, WHEEL_PERIOD = 50005)
+ *
+ *   LF_FULL  – full cruise duty for straight-ahead / single-sensor correction
+ *   LF_TURN  – reduced duty for the slowed wheel during a turn
+ *              Set LF_TURN = 0 for a hard pivot (one wheel stopped).
+ *              Raise LF_TURN toward LF_FULL for a gentler arc.
+ *==============================================================================*/
+#define LF_FULL                 (50000u)   /* both wheels at cruise speed       */
+#define LF_TURN                 (0u)       /* stopped wheel during line turn    */
+
+/*==============================================================================
+ * PWM helpers – switch P6 motor pins between GPIO mode and TB3 PWM mode.
+ *
+ * PWM_MODE_ON  : sets P6SEL0 for L_FORWARD/R_FORWARD/L_REVERSE/R_REVERSE so
+ *                TB3 drives them; also zeros P6OUT for those pins.
+ * PWM_MODE_OFF : clears P6SEL0, returning full GPIO control; zeros all CCRs.
+ *
+ * These are called at the boundary between IoT GPIO moves and PWM line-follow.
+ *==============================================================================*/
+static void pwm_motors_enable(void){
+    /* Return pins to TB3 output-compare function (SEL0=1, SEL1=0) */
+    P6SEL0 |=  (L_FORWARD | R_FORWARD | L_REVERSE | R_REVERSE);
+    P6SEL1 &= ~(L_FORWARD | R_FORWARD | L_REVERSE | R_REVERSE);
+    P6OUT  &= ~(L_FORWARD | R_FORWARD | L_REVERSE | R_REVERSE);
+}
+
+static void pwm_motors_disable(void){
+    /* Return pins to plain GPIO so P6OUT macros work correctly */
+    P6SEL0 &= ~(L_FORWARD | R_FORWARD | L_REVERSE | R_REVERSE);
+    P6SEL1 &= ~(L_FORWARD | R_FORWARD | L_REVERSE | R_REVERSE);
+    /* Zero all CCR duty cycles so TB3 outputs go low when GPIO takes over */
+    TB3CCR2 = WHEEL_OFF;   /* LEFT_FORWARD_SPEED  */
+    TB3CCR3 = WHEEL_OFF;   /* RIGHT_FORWARD_SPEED */
+    TB3CCR4 = WHEEL_OFF;   /* LEFT_REVERSE_SPEED  */
+    TB3CCR5 = WHEEL_OFF;   /* RIGHT_REVERSE_SPEED */
+    P6OUT  &= ~(L_FORWARD | R_FORWARD | L_REVERSE | R_REVERSE);
+}
+
+/*==============================================================================
+ * Motor GPIO macros  (used for IoT course moves and BL non-follow phases)
+ * These assume PWM_MODE_OFF (plain GPIO control of P6).
  *==============================================================================*/
 #define MOTORS_ALL_OFF()    (P6OUT &= ~(R_FORWARD | L_FORWARD | R_REVERSE | L_REVERSE))
 #define MOTORS_FORWARD()    do { P6OUT |=  (R_FORWARD | L_FORWARD); \
@@ -93,15 +126,14 @@ extern volatile unsigned char display_changed;
                                  P6OUT &= ~(R_FORWARD | L_REVERSE);  } while(0)
 #define MOTOR_IOT_LEFT()    do { P6OUT |=  (R_FORWARD | L_REVERSE); \
                                  P6OUT &= ~(L_FORWARD | R_REVERSE);  } while(0)
-/*  Exit turn: spin away from circle (away from pad 8 direction) */
+/*  Exit turn: spin away from circle */
 #define MOTOR_EXIT_TURN()   do { P6OUT |=  (R_FORWARD | L_REVERSE); \
                                  P6OUT &= ~(L_FORWARD | R_REVERSE);  } while(0)
 
 /*==============================================================================
  * IoT / motor timing
  *==============================================================================*/
-#define TIME_UNIT_TICKS         (1u)      /*         */
-
+#define TIME_UNIT_TICKS         (1u)
 
 /*==============================================================================
  * Security PIN
@@ -113,6 +145,7 @@ extern volatile unsigned char display_changed;
  * Autonomous BL state identifiers
  *==============================================================================*/
 #define BL_NONE                 (0u)
+#define BL_PRE_MOVE             (10u)  /* NEW: forward 2 s then right turn     */
 #define BL_START                (1u)   /* driving toward line                    */
 #define BL_PAUSE1               (2u)   /* 15 s stop: "Intercept" displayed       */
 #define BL_TURN                 (3u)   /* rotating until both sensors on black   */
@@ -131,6 +164,10 @@ extern volatile unsigned char display_changed;
 #define TICKS_CAL_SETTLE        (15u)   /* 3 s settle per calibration phase      */
 #define SPLASH_TICKS            (25u)   /* 5 s splash                            */
 
+/* Pre-movement timing (BL_PRE_MOVE) */
+#define TICKS_PRE_FORWARD       (10u)   /* 2 s forward before line intercept     */
+#define TICKS_PRE_RIGHT_TURN    (3u)    /* ~1 s right spin turn                  */
+
 /*==============================================================================
  * Calibration
  *==============================================================================*/
@@ -138,19 +175,11 @@ extern volatile unsigned char display_changed;
 
 /*==============================================================================
  * White confirmation filter
- *   The sensor must see white for WHITE_CONFIRM_COUNT consecutive ADC updates
- *   (~10 ms each) before black detection is re-armed.  This prevents floor
- *   specks and debris from triggering a false black reading.
- *   Increase to 8-10 if false triggers still occur.
  *==============================================================================*/
 #define WHITE_CONFIRM_COUNT     (5u)
 
 /*==============================================================================
  * Lost-line recovery
- *   If neither sensor sees the line for LOST_LINE_LIMIT consecutive
- *   line_follow_step() calls the car spins back toward the circle rather
- *   than driving straight off the mat.
- *   LOST_LINE_LIMIT is in units of main-loop passes (not ms ticks).
  *==============================================================================*/
 #define LOST_LINE_LIMIT         (20u)
 
@@ -170,14 +199,14 @@ static unsigned char g_bl_state        = BL_NONE;
 static unsigned int  g_bl_timer        = 0u;
 static unsigned char g_lap_edges       = 0u;
 static unsigned char g_prev_right_black = FALSE;
-static unsigned char g_exit_phase      = 0u;  /* 0=turn, 1=straight             */
+static unsigned char g_exit_phase      = 0u;
 static unsigned char g_exit_requested  = FALSE;
+
+/* BL_PRE_MOVE sub-phase: 0 = driving forward, 1 = turning right */
+static unsigned char g_pre_move_phase  = 0u;
 
 /*==============================================================================
  * Module globals – white-confirmation filter
- *   Separate counters for each sensor.  Counts consecutive ADC-updated passes
- *   where the sensor reads white.  Black is trusted immediately; white is only
- *   accepted after WHITE_CONFIRM_COUNT consecutive white readings.
  *==============================================================================*/
 static unsigned char g_white_confirm_L = 0u;
 static unsigned char g_white_confirm_R = 0u;
@@ -194,17 +223,18 @@ static char     ssid_display[11] = "          ";
 static char     ip_oct12[11]     = "          ";
 static char     ip_oct34[11]     = "          ";
 
-static unsigned char  g_on_pad         = FALSE;  /* TRUE when Arrived cmd received */
+static unsigned char  g_on_pad         = FALSE;
 static unsigned char  g_pad_number     = 0u;
-static unsigned char  g_course_active  = FALSE;  /* TRUE after first command       */
-static unsigned int   g_course_secs    = 0u;     /* seconds counter                */
-static unsigned int   g_sec_ticks      = 0u;     /* ticks toward next second       */
-static char           g_last_cmd[6]    = "     "; /* 5 relevant chars + null       */
-static unsigned char  g_autonomous     = FALSE;  /* TRUE when G command received   */
+static unsigned char  g_course_active  = FALSE;
+static unsigned int   g_course_secs    = 0u;
+static unsigned int   g_sec_ticks      = 0u;
+static char           g_last_cmd[6]    = "     ";
+static unsigned char  g_autonomous     = FALSE;
 static unsigned char  g_cal_done       = FALSE;
-static unsigned char tick_200ms = FALSE;
+static unsigned char  tick_200ms       = FALSE;
+
 /*==============================================================================
- * Helper: center_string – write text centered into a 10-char buffer
+ * Helper: center_string
  *==============================================================================*/
 static void center_string(const char *text, unsigned int len, char *out){
     unsigned int pad_left, pad_right, i, pos;
@@ -219,7 +249,7 @@ static void center_string(const char *text, unsigned int len, char *out){
 }
 
 /*==============================================================================
- * Helper: set_line – copy msg into display_line[line] and flag changed
+ * Helper: set_line
  *==============================================================================*/
 static void set_line(int line, const char *msg){
     strncpy(display_line[line], msg, 10u);
@@ -236,18 +266,12 @@ static void flag_display(void){
 
 /*==============================================================================
  * show_course_display
- * Updates all four LCD lines for IoT remote-control mode.
- *   Line 0: "Arrived 0X" if on pad, else "          " (or BL status)
- *   Line 1: ip_oct12
- *   Line 2: ip_oct34
- *   Line 3: last cmd (5 chars) + "  " + seconds counter
  *==============================================================================*/
 static void show_course_display(void){
     char line3[11];
     unsigned int s = g_course_secs;
     unsigned char d2, d1, d0;
 
-    /* Line 0: pad arrived or blank (BL states handled by caller) */
     if(!g_autonomous){
         if(g_on_pad){
             char pad_msg[11] = "Arrived 0 ";
@@ -258,11 +282,9 @@ static void show_course_display(void){
         }
     }
 
-    /* Lines 1-2: IP address */
     set_line(1, ip_oct12);
     set_line(2, ip_oct34);
 
-    /* Line 3: "Dcmd  NNNs"  (last cmd char, then seconds) */
     d2 = (unsigned char)(s / 100u);
     s %= 100u;
     d1 = (unsigned char)(s / 10u);
@@ -283,18 +305,18 @@ static void show_course_display(void){
 }
 
 /*==============================================================================
- * show_waiting_display – shown after calibration, before first command
+ * show_waiting_display
  *==============================================================================*/
 static void show_waiting_display(void){
     set_line(0, "Waiting   ");
-    set_line(1, "for input ");
+    set_line(1, "NCSU      ");
     set_line(2, ip_oct12);
     set_line(3, ip_oct34);
     Display_Update(0,0,0,0);
 }
 
 /*==============================================================================
- * show_bl_stop_display – final completion screen
+ * show_bl_stop_display
  *==============================================================================*/
 static void show_bl_stop_display(void){
     char time_line[11];
@@ -377,12 +399,12 @@ static void run_calibration(void){
     Display_Update(0,0,0,0);
     settle = 0u;
     while(settle < TICKS_CAL_SETTLE){
-            if(update_display_count > 0u){
-                update_display_count--;
-                update_display = TRUE;
-                settle++;
-            }
-            Display_Process();
+        if(update_display_count > 0u){
+            update_display_count--;
+            update_display = TRUE;
+            settle++;
+        }
+        Display_Process();
     }
     g_white_left  = average_adc_samples(0u);
     g_white_right = average_adc_samples(1u);
@@ -422,25 +444,17 @@ static unsigned char is_black_right_raw(void){
 
 /*==============================================================================
  * Line detection – white-confirmation filtered versions
- *
- *   Black is trusted immediately (fast reaction to finding the line).
- *   White is only accepted after WHITE_CONFIRM_COUNT consecutive white
- *   readings, preventing floor specks from briefly interrupting detection.
- *
- *   Call these instead of is_black_left_raw() / is_black_right_raw() in all
- *   line-following and lap-counting code.
  *==============================================================================*/
 static unsigned char is_black_left_filtered(void){
     if(is_black_left_raw()){
-        g_white_confirm_L = 0u;   /* reset white streak – definitely black now */
+        g_white_confirm_L = 0u;
         return TRUE;
     }
-    /* Reading is white; only accept it after enough consecutive white reads   */
     if(g_white_confirm_L < WHITE_CONFIRM_COUNT){
         g_white_confirm_L++;
-        return TRUE;              /* still treating as "black" until confirmed  */
+        return TRUE;
     }
-    return FALSE;                 /* confirmed white                            */
+    return FALSE;
 }
 
 static unsigned char is_black_right_filtered(void){
@@ -456,7 +470,7 @@ static unsigned char is_black_right_filtered(void){
 }
 
 /*==============================================================================
- * get_line_state_dyn – uses filtered sensor readings
+ * get_line_state_dyn
  *==============================================================================*/
 static unsigned char get_line_state_dyn(void){
     unsigned char s = LINE_NONE;
@@ -466,66 +480,93 @@ static unsigned char get_line_state_dyn(void){
 }
 
 /*==============================================================================
- * line_follow_step – reactive two-sensor circle follower
+ * line_follow_step – PWM reactive line follower  (mirrors Project 7 logic)
  *
- * Improvements over the original bang-bang follower:
+ * Assumes pwm_motors_enable() has been called before the first invocation so
+ * the P6 pins are routed to TB3.  PWM duty cycles are set via TB3CCR2-5:
  *
- *   1. LINE_BOTH applies an inside bias (MOTOR_TURN_RIGHT) so the car
- *      hugs the inside of the circle instead of straightening out and
- *      overshooting to the outside.
- *      → Swap MOTOR_TURN_RIGHT ↔ MOTOR_TURN_LEFT if your circle runs CCW.
+ *   TB3CCR2  LEFT_FORWARD_SPEED
+ *   TB3CCR3  RIGHT_FORWARD_SPEED
+ *   TB3CCR4  LEFT_REVERSE_SPEED   (kept 0 – forward-only line follow)
+ *   TB3CCR5  RIGHT_REVERSE_SPEED  (kept 0)
  *
- *   2. Lost-line recovery: if neither sensor sees black for LOST_LINE_LIMIT
- *      consecutive calls the car spins toward the circle (MOTOR_TURN_RIGHT)
- *      instead of driving straight off the mat.
- *      → Swap to MOTOR_TURN_LEFT if your circle runs CCW.
+ * Sensor cases (identical to P7 bang-bang, now with proportional PWM):
  *
- *   Filter state (g_white_confirm_L/R, g_lost_line_count) is reset at the
- *   start of BL_CIRCLE so it does not carry stale data from earlier states.
+ *   LINE_BOTH   – both wheels full speed forward (on line, stay straight)
+ *   LINE_LEFT   – left sensor only on black  → turn LEFT
+ *                 right wheel = LF_FULL, left wheel = LF_TURN
+ *   LINE_RIGHT  – right sensor only on black → turn RIGHT
+ *                 left wheel = LF_FULL, right wheel = LF_TURN
+ *   LINE_NONE   – line lost; coast forward for LOST_LINE_LIMIT iterations,
+ *                 then apply a right-bias spin to re-acquire.
  *==============================================================================*/
 static void line_follow_step(void){
     unsigned char state = get_line_state_dyn();
-
-    if(state == LINE_NONE){
-        g_lost_line_count++;
-        if(g_lost_line_count > LOST_LINE_LIMIT){
-            /*------------------------------------------------------------------
-             * Line lost too long – spin back toward the circle.
-             * MOTOR_TURN_RIGHT keeps a CW circle; swap to LEFT for CCW.
-             *----------------------------------------------------------------*/
-            MOTOR_TURN_RIGHT();
-        } else {
-            /* Grace period: coast straight hoping to re-acquire line          */
-            MOTORS_FORWARD();
-        }
-        return;
-    }
-
-    /* Line seen – reset lost counter */
-    g_lost_line_count = 0u;
-
     switch(state){
+
+        /*----------------------------------------------------------------------
+         * Both sensors on black: drive straight ahead at full cruise speed.
+         * Mirrors P7:  MOTORS_FORWARD()
+         *--------------------------------------------------------------------*/
         case LINE_BOTH:
-            /*------------------------------------------------------------------
-             * Both sensors on the line.  Apply a gentle inside bias so the
-             * car stays on the circular arc rather than cutting straight across.
-             * Change MOTOR_TURN_RIGHT to MOTOR_TURN_LEFT for a CCW circle.
-             *----------------------------------------------------------------*/
-            MOTOR_TURN_RIGHT();
+            LEFT_REVERSE_SPEED = 0;
+            RIGHT_REVERSE_SPEED = 0;
+            LEFT_FORWARD_SPEED = LF_FULL;   /* LEFT_FORWARD_SPEED  */
+            RIGHT_FORWARD_SPEED = LF_FULL;   /* RIGHT_FORWARD_SPEED */
+            g_lost_line_count = 0u;
             break;
 
+        /*----------------------------------------------------------------------
+         * Left sensor only on black: drifting right, correct left.
+         * Right wheel drives at full speed; left wheel slows/stops.
+         * Mirrors P7:  MOTOR_TURN_LEFT()  (right wheel drives)
+         *--------------------------------------------------------------------*/
         case LINE_LEFT:
-            /* Left sensor on black – drifting right, correct left            */
-            MOTOR_TURN_LEFT();
+            LEFT_FORWARD_SPEED = 0;
+            RIGHT_REVERSE_SPEED = 0;
+            LEFT_REVERSE_SPEED = 20000;   /* LEFT_FORWARD_SPEED  – slowed/stopped       */
+            RIGHT_FORWARD_SPEED = 50000;   /* RIGHT_FORWARD_SPEED – full speed            */
+            g_lost_line_count = 0u;
             break;
 
+        /*----------------------------------------------------------------------
+         * Right sensor only on black: drifting left, correct right.
+         * Left wheel drives at full speed; right wheel slows/stops.
+         * Mirrors P7:  MOTOR_TURN_RIGHT() (left wheel drives)
+         *--------------------------------------------------------------------*/
         case LINE_RIGHT:
-            /* Right sensor on black – drifting left, correct right           */
-            MOTOR_TURN_RIGHT();
+            LEFT_REVERSE_SPEED = 0;   /* LEFT_FORWARD_SPEED  – slowed/stopped       */
+            RIGHT_FORWARD_SPEED = 0;
+            LEFT_FORWARD_SPEED = 50000;
+            RIGHT_REVERSE_SPEED = 20000;
+
+            g_lost_line_count = 0u;
             break;
 
+        /*----------------------------------------------------------------------
+         * Neither sensor on black: line temporarily lost.
+         * Coast straight for LOST_LINE_LIMIT passes, then apply right-bias
+         * spin (left wheel full, right wheel stopped) to turn back toward the
+         * circle.
+         * Mirrors P7:  MOTORS_FORWARD() on loss, then spin recovery.
+         *--------------------------------------------------------------------*/
+        case LINE_NONE:
         default:
-            MOTOR_TURN_RIGHT();
+            g_lost_line_count++;
+            if(g_lost_line_count > LOST_LINE_LIMIT){
+                /* Spin right: left wheel full, right wheel stopped */
+                LEFT_REVERSE_SPEED = 0;   /* LEFT_FORWARD_SPEED  – slowed/stopped       */
+                RIGHT_FORWARD_SPEED = 0;
+                LEFT_FORWARD_SPEED = 50000;
+                RIGHT_REVERSE_SPEED = 20000;
+            } else {
+                /* Coast straight – hope to re-acquire */
+
+                LEFT_FORWARD_SPEED = 0;   /* LEFT_FORWARD_SPEED  */
+                RIGHT_FORWARD_SPEED = 0;
+                LEFT_REVERSE_SPEED = 50000;
+                RIGHT_REVERSE_SPEED = 50000;
+            }
             break;
     }
 }
@@ -601,18 +642,9 @@ static void parse_cifsr(const char *line){
     }
     center_string(ip, j, ip_oct12);
 }
+
 /*==============================================================================
  * parse_web_command
- *
- * Supported commands after PIN (^1234):
- *   F tttt  – forward  tttt × 500 ms
- *   B tttt  – reverse  tttt × 500 ms
- *   R tttt  – right    tttt × 500 ms
- *   L tttt  – left     tttt × 500 ms
- *   S 0     – stop immediately
- *   P X     – arrived at pad X  (1-8)
- *   G 0     – go autonomous (start BL sequence)
- *   X 0     – exit circle   (trigger BL_EXIT)
  *==============================================================================*/
 static unsigned char g_motor_direction  = 'S';
 static unsigned int  g_motor_remaining  = 0u;
@@ -621,12 +653,10 @@ static void parse_web_command(const char *payload){
     unsigned int i = 0u, consumed = 0u, units = 0u;
     char dir;
 
-    /* Find '^' */
     while(payload[i] != '\0' && payload[i] != '^'){ i++; }
     if(payload[i] == '\0'){ return; }
     i++;
 
-    /* Check PIN */
     if(!ch_match(&payload[i], SECRET_PIN, SECRET_PIN_LEN)){
         UCA1_Transmit_String("BAD PIN\r\n", 9u);
         return;
@@ -636,7 +666,6 @@ static void parse_web_command(const char *payload){
     dir   = payload[i++];
     units = parse_uint(&payload[i], &consumed);
 
-    /* Build 5-char last-command display: "Dtttt" */
     g_last_cmd[0] = dir;
     g_last_cmd[1] = (units >= 1000u) ? (char)('0' + units/1000u) : ' ';
     g_last_cmd[2] = (units >=  100u) ? (char)('0' + (units%1000u)/100u) : '0';
@@ -644,7 +673,6 @@ static void parse_web_command(const char *payload){
     g_last_cmd[4] = (char)('0' + units % 10u);
     g_last_cmd[5] = '\0';
 
-    /* Start seconds counter on first command */
     if(!g_course_active){
         g_course_active = TRUE;
         g_course_secs   = 0u;
@@ -669,44 +697,50 @@ static void parse_web_command(const char *payload){
             break;
 
         case 'V': case 'v':
-            /* DAC voltage: units holds the raw DAC register value
-             * e.g. ^1234V875 -> DAC_Set(875) ~ 6.2 V              */
             if(units >= DAC_MIN_VALUE && units <= DAC_MAX_VALUE){
                 DAC_Set((unsigned int)units);
             }
             break;
 
         case 'P': case 'p':
-            /* Pad arrival: units holds pad number */
             g_pad_number = (unsigned char)units;
             g_on_pad     = TRUE;
             break;
 
         case 'G': case 'g':
-            /* Go autonomous – start BL sequence */
+            /*------------------------------------------------------------------
+             * Go autonomous – begin BL_PRE_MOVE (forward 2 s then right turn)
+             * before entering the line-intercept phase (BL_START).
+             *----------------------------------------------------------------*/
             if(!g_autonomous){
                 g_autonomous = TRUE;
                 g_on_pad     = FALSE;
                 MOTORS_ALL_OFF();
-                g_bl_state  = BL_START;
-                g_bl_timer  = 0u;
-                g_lap_edges = 0u;
+
+                /* Start in the new pre-movement state */
+                g_bl_state      = BL_PRE_MOVE;
+                g_pre_move_phase = 0u;    /* sub-phase 0 = forward             */
+                g_bl_timer      = 0u;
+
+                /* Reset lap / filter state */
+                g_lap_edges        = 0u;
                 g_prev_right_black = is_black_right_filtered();
                 g_exit_requested   = FALSE;
                 g_exit_phase       = 0u;
-                /* Reset filter state for clean start */
                 g_white_confirm_L  = 0u;
                 g_white_confirm_R  = 0u;
                 g_lost_line_count  = 0u;
-                set_line(0, "BL Start  ");
+
+                set_line(0, "BL PreMove");
                 show_course_display();
                 Display_Update(0,0,0,0);
+
+                /* Start driving forward immediately */
                 MOTORS_FORWARD();
             }
             break;
 
         case 'X': case 'x':
-            /* Exit circle command */
             if(g_autonomous && (g_bl_state == BL_CIRCLE || g_bl_state == BL_PAUSE3)){
                 g_exit_requested = TRUE;
             }
@@ -726,7 +760,6 @@ static void process_iot_msg(void){
     const char *msg;
     unsigned int k;
 
-    /* nothing ready */
     if(!iot_msg_ready[ridx]){ return; }
 
     msg = (const char *)iot_rx_msg[ridx];
@@ -741,13 +774,12 @@ static void process_iot_msg(void){
         if(msg[k] == ':'){ parse_web_command(&msg[k + 1u]); }
     }
 
-    /* mark slot consumed and advance read index */
     iot_msg_ready[ridx] = FALSE;
     iot_rx_read_idx = (unsigned char)((ridx + 1u) % IOT_MSG_COUNT);
-    /* no need to disable/re-enable UCA0 RX – ISR runs freely now */
 }
+
 /*==============================================================================
- * process_fram_cmd – handle PC backdoor ^ commands
+ * process_fram_cmd
  *==============================================================================*/
 static void process_fram_cmd(void){
     if(!fram_cmd_ready){ return; }
@@ -776,11 +808,11 @@ static void execute_motor_unit(void){
     }
 
     switch(g_motor_direction){
-        case 'F': case 'f': MOTORS_FORWARD();    break;
-        case 'B': case 'b': MOTORS_REVERSE();    break;
-        case 'R': case 'r': MOTOR_TURN_RIGHT();   break;
-        case 'L': case 'l': MOTOR_TURN_LEFT();    break;
-        default:            MOTORS_ALL_OFF();    break;
+        case 'F': case 'f': MOTORS_FORWARD();   break;
+        case 'B': case 'b': MOTORS_REVERSE();   break;
+        case 'R': case 'r': MOTOR_TURN_RIGHT();  break;
+        case 'L': case 'l': MOTOR_TURN_LEFT();   break;
+        default:            MOTORS_ALL_OFF();   break;
     }
 
     if(tick_200ms){
@@ -793,14 +825,48 @@ static void execute_motor_unit(void){
 
 /*==============================================================================
  * bl_state_machine
- *
- * Called once per main loop pass when g_autonomous == TRUE.
- * Uses update_display tick for timing.
- * tick_consumed: TRUE when the current pass consumed a 200 ms tick.
  *==============================================================================*/
 static void bl_state_machine(unsigned char tick_consumed){
 
     switch(g_bl_state){
+
+        /*----------------------------------------------------------------------
+         * BL_PRE_MOVE – forward 2 s (TICKS_PRE_FORWARD × 200 ms),
+         *               then right spin turn ~1 s (TICKS_PRE_RIGHT_TURN × 200 ms),
+         *               then enter BL_START (line intercept).
+         *
+         *   sub-phase 0: motors forward, count ticks
+         *   sub-phase 1: motor right spin, count ticks
+         *--------------------------------------------------------------------*/
+        case BL_PRE_MOVE:
+            if(tick_consumed){ g_bl_timer++; }
+
+            if(g_pre_move_phase == 0u){
+                /* Forward phase */
+                if(g_bl_timer >= TICKS_PRE_FORWARD){
+                    /* Switch to right-turn sub-phase */
+                    g_pre_move_phase = 1u;
+                    g_bl_timer       = 0u;
+                    MOTOR_TURN_RIGHT();   /* full spin right turn                */
+                    set_line(0, "BL RtTurn ");
+                    show_course_display();
+                    Display_Update(0,0,0,0);
+                }
+                /* else: keep driving forward (MOTORS_FORWARD set on entry) */
+
+            } else {
+                /* Right-turn phase */
+                if(g_bl_timer >= TICKS_PRE_RIGHT_TURN){
+                    /* Pre-movement complete – enter line intercept */
+                    g_bl_timer = 0u;
+                    g_bl_state = BL_START;
+                    MOTORS_FORWARD();    /* drive toward the black line         */
+                    set_line(0, "BL Start  ");
+                    show_course_display();
+                    Display_Update(0,0,0,0);
+                }
+            }
+            break;
 
         /*----------------------------------------------------------------------
          * BL_START – drive forward until either sensor detects line
@@ -817,7 +883,7 @@ static void bl_state_machine(unsigned char tick_consumed){
             break;
 
         /*----------------------------------------------------------------------
-         * BL_PAUSE1 – 15 s mandatory stop, display "Intercept"
+         * BL_PAUSE1 – 15 s mandatory stop
          *--------------------------------------------------------------------*/
         case BL_PAUSE1:
             if(tick_consumed){ g_bl_timer++; }
@@ -827,7 +893,7 @@ static void bl_state_machine(unsigned char tick_consumed){
                 set_line(0, "BL Turn   ");
                 show_course_display();
                 Display_Update(0,0,0,0);
-                MOTOR_TURN_LEFT();    /* begin rotating to align */
+                MOTOR_TURN_LEFT();
             }
             break;
 
@@ -839,13 +905,11 @@ static void bl_state_machine(unsigned char tick_consumed){
                 MOTORS_ALL_OFF();
                 g_bl_state = BL_PAUSE2;
                 g_bl_timer = 0u;
-                /* Keep "BL Turn" on display during the pause */
                 show_course_display();
                 Display_Update(0,0,0,0);
             } else {
                 if(tick_consumed){ g_bl_timer++; }
                 if(g_bl_timer >= TICKS_ALIGN_TIMEOUT){
-                    /* Safety: give up aligning, proceed anyway */
                     MOTORS_ALL_OFF();
                     g_bl_state = BL_PAUSE2;
                     g_bl_timer = 0u;
@@ -856,7 +920,7 @@ static void bl_state_machine(unsigned char tick_consumed){
             break;
 
         /*----------------------------------------------------------------------
-         * BL_PAUSE2 – 15 s stop after turn, display "BL Turn"
+         * BL_PAUSE2 – 15 s stop after turn
          *--------------------------------------------------------------------*/
         case BL_PAUSE2:
             if(tick_consumed){ g_bl_timer++; }
@@ -866,30 +930,25 @@ static void bl_state_machine(unsigned char tick_consumed){
                 set_line(0, "BL Travel ");
                 show_course_display();
                 Display_Update(0,0,0,0);
-                /* Start following – will naturally enter circle */
+                pwm_motors_enable();   /* switch P6 pins to TB3 PWM for line follow */
             }
             break;
 
         /*----------------------------------------------------------------------
-         * BL_TRAVEL – follow line toward circle.
-         * Transition to BL_PAUSE3 when we detect we've entered the circle
-         * (simple heuristic: timer counts a fixed travel window then pauses).
-         * Using a lap-entry edge: once the right sensor crosses white->black
-         * once while moving, we consider the circle entered.
+         * BL_TRAVEL – follow line toward circle (PWM line follow active)
          *--------------------------------------------------------------------*/
         case BL_TRAVEL:
-            line_follow_step();
+            line_follow_step();   /* PWM mode; pwm_motors_enable() called on entry to this state */
             if(tick_consumed){ g_bl_timer++; }
             {
                 unsigned char cur = is_black_right_filtered();
                 if((cur == TRUE) && (g_prev_right_black == FALSE)){
-                    /* First rising edge after travel start = circle entry */
                     g_lap_edges++;
                 }
                 g_prev_right_black = cur;
             }
-            /* Enter pause when first edge seen OR after 60-tick (12s) safety */
-            if(g_lap_edges >= 1u || g_bl_timer >= 60u){
+            if(g_bl_timer >= 20u){
+                pwm_motors_disable();  /* return P6 pins to GPIO before stopping */
                 MOTORS_ALL_OFF();
                 g_bl_state  = BL_PAUSE3;
                 g_bl_timer  = 0u;
@@ -902,13 +961,13 @@ static void bl_state_machine(unsigned char tick_consumed){
             break;
 
         /*----------------------------------------------------------------------
-         * BL_PAUSE3 – 15 s stop to display "BL Circle" before full lap
+         * BL_PAUSE3 – 15 s stop before full circle following
          *--------------------------------------------------------------------*/
         case BL_PAUSE3:
             if(tick_consumed){ g_bl_timer++; }
-            /* Allow exit command during pause */
             if(g_exit_requested){
                 g_exit_requested = FALSE;
+                pwm_motors_disable();  /* no-op if already in GPIO mode; safe   */
                 g_bl_state  = BL_EXIT;
                 g_bl_timer  = 0u;
                 g_exit_phase = 0u;
@@ -922,20 +981,16 @@ static void bl_state_machine(unsigned char tick_consumed){
                 g_bl_timer  = 0u;
                 g_bl_state  = BL_CIRCLE;
                 g_lap_edges = 0u;
-                /* Reset filter state so stale TRAVEL readings don't affect   */
-                /* the lap-edge counter on the very first circle pass.         */
                 g_white_confirm_L  = 0u;
                 g_white_confirm_R  = 0u;
                 g_lost_line_count  = 0u;
                 g_prev_right_black = is_black_right_filtered();
-                /* Already showing "BL Circle" – continue following */
+                pwm_motors_enable();   /* switch to TB3 PWM for circle following */
             }
             break;
 
         /*----------------------------------------------------------------------
          * BL_CIRCLE – follow circle, count laps
-         *   line_follow_step() now uses the filtered sensor readings and the
-         *   inside-bias + lost-line recovery logic defined above.
          *--------------------------------------------------------------------*/
         case BL_CIRCLE:
             line_follow_step();
@@ -946,9 +1001,9 @@ static void bl_state_machine(unsigned char tick_consumed){
                 }
                 g_prev_right_black = cur;
             }
-            /* Check for exit command (set by parse_web_command) */
             if(g_exit_requested){
                 g_exit_requested = FALSE;
+                pwm_motors_disable();  /* return P6 to GPIO before GPIO spin    */
                 MOTORS_ALL_OFF();
                 g_bl_state   = BL_EXIT;
                 g_bl_timer   = 0u;
@@ -961,9 +1016,7 @@ static void bl_state_machine(unsigned char tick_consumed){
             break;
 
         /*----------------------------------------------------------------------
-         * BL_EXIT – turn then drive straight > 2 feet
-         *   Phase 0: spin away from circle for TICKS_EXIT_TURN
-         *   Phase 1: drive straight for TICKS_EXIT_DRIVE then stop
+         * BL_EXIT – spin away then drive straight
          *--------------------------------------------------------------------*/
         case BL_EXIT:
             if(tick_consumed){ g_bl_timer++; }
@@ -984,10 +1037,9 @@ static void bl_state_machine(unsigned char tick_consumed){
             break;
 
         /*----------------------------------------------------------------------
-         * BL_STOP – course complete, display final screen; stay here
+         * BL_STOP – course complete
          *--------------------------------------------------------------------*/
         case BL_STOP:
-            /* Motors off, nothing more to do */
             IR_LED_control(IR_LED_OFF);
             break;
 
@@ -1004,31 +1056,22 @@ static void bl_state_machine(unsigned char tick_consumed){
 void main(void){
     unsigned int  state_timer = 0u;
 
-    /* ── Unlock GPIO ── */
     PM5CTL0 &= ~LOCKLPM5;
 
-    /* ── Hardware init ── */
     Init_Ports();
     Init_Clocks();
     Init_Conditions();
     Init_Timers();
-    /* DAC init + soft-start ramp */
     Init_DAC();
-    /* Wait for ramp to complete (DAC_Ramp_Step disables TBIE when done) */
-    while(!DAC_ready){
-        /* TB0 overflow ISR is running the ramp; foreground just waits */
-    }
-    /* Set cruise voltage */
+    while(!DAC_ready){ /* wait for soft-start ramp */ }
     DAC_Set(DAC_CRUISE);
     Init_LCD();
     Init_ADC();
     Init_Timer_B1();
 
-
     MOTORS_ALL_OFF();
     IR_LED_control(IR_LED_OFF);
 
-    /* ── Serial (IOT + PC backdoor) ── */
     Init_Serial_UCA0(BAUD_115200);
     Init_Serial_UCA1(BAUD_115200);
 
@@ -1039,9 +1082,7 @@ void main(void){
     set_line(3, "Port:6767 ");
     Display_Update(0,0,0,0);
 
-    /* ── IOT init ── */
     state_timer = 0u;
-    /* Wait ~5 s splash */
     while(state_timer < SPLASH_TICKS){
         if(update_display_count > 0u){
             update_display_count--;
@@ -1061,29 +1102,49 @@ void main(void){
 
     /* ── Query SSID + IP ── */
     {
-        unsigned int  iot_timer  = 0u;
-
-        while(iot_timer < 50u){   /* 30 s max – ESP8266 needs time to connect */
+        unsigned int iot_timer = 0u;
+        while(iot_timer < 50u){
             if(update_display_count > 0u){
                 update_display_count--;
                 update_display = TRUE;
                 iot_timer++;
             }
             Display_Process();
-
             while(iot_msg_ready[iot_rx_read_idx]){
                 process_iot_msg();
             }
-
-            /* Send CIFSR later to give ESP8266 time to get an IP */
             if(iot_timer >= 5u){
                 UCA0_Transmit_String("AT+CIFSR\r\n", 10u);
-
             }
             if(ip_oct12[0] != ' '){ break; }
-
         }
     }
+
+    /*==========================================================================
+     * Gate calibration on SW1 press.
+     * Show "Press SW1 / to Calibrate" and wait.  Continue to drain IOT
+     * messages while waiting so the WiFi handshake completes.
+     *========================================================================*/
+    sw1_pressed = FALSE;   /* clear any spurious press from startup             */
+    set_line(0, "Press SW1 ");
+    set_line(1, "to        ");
+    set_line(2, "Calibrate ");
+    set_line(3, ip_oct34);
+    Display_Update(0,0,0,0);
+
+    while(!sw1_pressed){
+        if(update_display_count > 0u){
+            update_display_count--;
+            update_display = TRUE;
+        }
+        Display_Process();
+        while(iot_msg_ready[iot_rx_read_idx]){
+            process_iot_msg();
+        }
+        process_fram_cmd();
+    }
+    sw1_pressed = FALSE;   /* consume the press                                 */
+
     /* ── Calibration ── */
     run_calibration();
 
@@ -1095,19 +1156,15 @@ void main(void){
      *========================================================================*/
     while(ALWAYS){
 
-        /*----------------------------------------------------------------------
-         * 200 ms tick
-         *--------------------------------------------------------------------*/
         tick_200ms = FALSE;
         if(update_display_count > 0u){
             update_display_count--;
             update_display = TRUE;
             tick_200ms     = TRUE;
 
-            /* Seconds counter (only while course active) */
             if(g_course_active && g_bl_state != BL_STOP){
                 g_sec_ticks++;
-                if(g_sec_ticks >= 5u){   /* 5 × 200 ms = 1 s */
+                if(g_sec_ticks >= 5u){
                     g_sec_ticks = 0u;
                     if(g_course_secs < 999u){ g_course_secs++; }
                 }
@@ -1116,40 +1173,25 @@ void main(void){
 
         Display_Process();
 
-        /*----------------------------------------------------------------------
-         * IOT message handler
-         *--------------------------------------------------------------------*/
-        /* drain all pending messages each pass */
-            while(iot_msg_ready[iot_rx_read_idx]){
-                process_iot_msg();
-            }
+        while(iot_msg_ready[iot_rx_read_idx]){
+            process_iot_msg();
+        }
 
-        /*----------------------------------------------------------------------
-         * FRAM ^ command handler
-         *--------------------------------------------------------------------*/
         process_fram_cmd();
 
-        /*----------------------------------------------------------------------
-         * Autonomous BL state machine
-         *--------------------------------------------------------------------*/
         if(g_autonomous){
             bl_state_machine(tick_200ms);
 
-            /* Refresh course display every tick during autonomous phases */
             if(tick_200ms && g_bl_state != BL_STOP){
                 show_course_display();
                 Display_Update(0,0,0,0);
             }
 
         } else {
-            /*------------------------------------------------------------------
-             * IoT remote-control mode: execute queued motor unit
-             *----------------------------------------------------------------*/
             if(g_motor_remaining > 0u){
                 execute_motor_unit();
             }
 
-            /* Refresh display every tick */
             if(tick_200ms && g_course_active){
                 show_course_display();
                 Display_Update(0,0,0,0);

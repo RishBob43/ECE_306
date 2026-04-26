@@ -101,20 +101,9 @@
  * Vehicle state machine states  [P7 – expanded from P6]
  *   Values match the STATE_* defines in main.c; kept here for shared reference.
  *------------------------------------------------------------------------------*/
-#define STATE_IDLE              (0x00)
-#define STATE_DELAY             (0x01)
-#define STATE_FORWARD           (0x02)
-#define STATE_LINE_STOP         (0x03)
-#define STATE_TURN              (0x04)
-#define STATE_ON_LINE           (0x05)
+
 /* P7 additions */
-#define STATE_CALIBRATE         (0x06)    /* [P7] Ambient / white / black cal   */
-#define STATE_INTERCEPT         (0x07)    /* [P7] Drive to line                 */
-#define STATE_WAIT              (0x08)    /* [P7] Hold on detected line         */
-#define STATE_ALIGN             (0x09)    /* [P7] Rotate until both on line     */
-#define STATE_CIRCLE            (0x0A)    /* [P7] Follow line for 2 laps        */
-#define STATE_EXIT              (0x0B)    /* [P7] Turn inward, drive to center  */
-#define STATE_STOPPED           (0x0C)    /* [P7] All done, await SW1           */
+
 
 /*------------------------------------------------------------------------------
  * Motor PWM duty cycles (for future PWM use)
@@ -139,12 +128,13 @@
 
 /*  Duration of the inward exit turn + straight drive (in 200 ms ticks).
  *  12 ticks = 2.4 s.  Tune based on circle radius and motor speed.           */
-#define TICKS_EXIT_DRIVE        (8u)
 
 /*  Maximum ticks allowed for the ALIGN rotation before safety timeout.
  *  40 ticks = 8 s.                                                            */
 #define TICKS_ALIGN_TIMEOUT     (40u)
 
+
+#define TICKS_EXIT_DRIVE        (8u)
 /*  Settle ticks after toggling emitter during calibration (3 = 600 ms).       */
 #define TICKS_CAL_SETTLE        (15u)  /* 15 × 200ms = 3s per phase            */
 
