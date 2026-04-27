@@ -86,7 +86,7 @@
  *   Black surface -> high ADC value (low reflection, pull-up dominates)
  *   White surface -> low  ADC value (high reflection, transistor conducts)
  *------------------------------------------------------------------------------*/
-#define BLACK_LINE_THRESHOLD    (650u)    /* Static fallback – tune on bench    */
+#define BLACK_LINE_THRESHOLD    (350u)    /* Static fallback – tune on bench    */
 #define WHITE_THRESHOLD         (125u)    /* Lower bound for "definitely white" */
 
 /*------------------------------------------------------------------------------

@@ -76,7 +76,7 @@ extern volatile unsigned char display_changed;
  *              Raise LF_TURN toward LF_FULL for a gentler arc.
  *==============================================================================*/
 #define LF_FULL                 (50000u)   /* both wheels at cruise speed       */
-#define LF_TURN                 (0u)       /* stopped wheel during line turn    */
+#define LF_TURN                 (20000u)       /* stopped wheel during line turn    */
 
 /*==============================================================================
  * PWM helpers – switch P6 motor pins between GPIO mode and TB3 PWM mode.
@@ -115,6 +115,8 @@ static void pwm_motors_disable(void){
                                  P6OUT &= ~(R_REVERSE | L_REVERSE);  } while(0)
 #define MOTORS_REVERSE()    do { P6OUT |=  (R_REVERSE | L_REVERSE); \
                                  P6OUT &= ~(R_FORWARD | L_FORWARD);  } while(0)
+#define MOTORS_REVERSE_RIGHT()    do { P6OUT |=  (R_REVERSE); \
+                                 P6OUT &= ~(R_FORWARD | L_FORWARD| L_REVERSE);  } while(0)
 /*  Turn RIGHT – LEFT wheel drives, right wheel off  */
 #define MOTOR_TURN_RIGHT()  do { P6OUT |=  L_FORWARD; \
                                  P6OUT &= ~(R_FORWARD | R_REVERSE | L_REVERSE); } while(0)
@@ -134,6 +136,9 @@ static void pwm_motors_disable(void){
  * IoT / motor timing
  *==============================================================================*/
 #define TIME_UNIT_TICKS         (1u)
+/* Consecutive ADC ticks (200 ms each) of white required before seeking black */
+#define TICKS_WHITE_CONFIRM     (5u)   /* 5 × 200 ms = 1 s                    */
+static unsigned char g_bl_start_white_ticks = 0u;   /* white-before-black counter */
 
 /*==============================================================================
  * Security PIN
@@ -166,17 +171,14 @@ static void pwm_motors_disable(void){
 
 /* Pre-movement timing (BL_PRE_MOVE) */
 #define TICKS_PRE_FORWARD       (10u)   /* 2 s forward before line intercept     */
-#define TICKS_PRE_RIGHT_TURN    (3u)    /* ~1 s right spin turn                  */
-
+#define TICKS_PRE_RIGHT_TURN    (10u)    /* ~1 s right turn (left wheel only)     */
+#define TICKS_PRE_RIGHT_REVERSE_TURN    (17u)    /* ~1 s right turn (left wheel only)     */
 /*==============================================================================
  * Calibration
  *==============================================================================*/
 #define CAL_THRESHOLD_MARGIN    (50u)
 
-/*==============================================================================
- * White confirmation filter
- *==============================================================================*/
-#define WHITE_CONFIRM_COUNT     (5u)
+
 
 /*==============================================================================
  * Lost-line recovery
@@ -205,11 +207,11 @@ static unsigned char g_exit_requested  = FALSE;
 /* BL_PRE_MOVE sub-phase: 0 = driving forward, 1 = turning right */
 static unsigned char g_pre_move_phase  = 0u;
 
+
+
 /*==============================================================================
  * Module globals – white-confirmation filter
  *==============================================================================*/
-static unsigned char g_white_confirm_L = 0u;
-static unsigned char g_white_confirm_R = 0u;
 
 /*==============================================================================
  * Module globals – lost-line recovery counter
@@ -346,47 +348,53 @@ static void show_bl_stop_display(void){
  * Calibration helpers
  *==============================================================================*/
 static unsigned int average_adc_samples(unsigned char channel_flag){
-    unsigned int  sum   = 0u;
-    unsigned char count = 0u;
+    unsigned int  sum     = 0u;
+    unsigned char count   = 0u;
+    unsigned int  current = 0u;
+    char          live[11];
+    unsigned int  s;
+
     while(count < NUM_CAL_SAMPLES){
         if(ADC_updated){
             ADC_updated = FALSE;
-            sum += (channel_flag == 0u) ? ADC_Left_Detect : ADC_Right_Detect;
+            current = (channel_flag == 0u) ? ADC_Left_Detect : ADC_Right_Detect;
+            sum    += current;
             count++;
+
+            /* Build "Lxxx Cyyyy" or "Rxxx Cyyyy" live readout on line 3      */
+            /* "Cn:cccc  " where n=count, cccc=current reading                 */
+            live[0] = (channel_flag == 0u) ? 'L' : 'R';
+            s = current;
+            live[1] = (char)('0' + s / 100u); s %= 100u;
+            live[2] = (char)('0' + s / 10u);  s %= 10u;
+            live[3] = (char)('0' + s);
+            live[4] = ' ';
+            live[5] = 'n';
+            live[6] = '=';
+            live[7] = (char)('0' + count / 10u);
+            live[8] = (char)('0' + count % 10u);
+            live[9] = ' '; live[10] = '\0';
+            set_line(3, live);
+            Display_Update(0, 0, 0, 0);
         }
     }
     return (sum / NUM_CAL_SAMPLES);
 }
-
 static void update_dynamic_threshold(void){
     unsigned int white_avg = (g_white_left  + g_white_right)  / 2u;
     unsigned int black_avg = (g_black_left  + g_black_right)  / 2u;
     if(black_avg > (white_avg + CAL_THRESHOLD_MARGIN)){
-        g_threshold = (white_avg + black_avg) / 2u;
+        /* Weight black 2:1 over white so threshold sits closer to white,
+           reducing false black triggers on slightly dark surfaces.         */
+        g_threshold = (white_avg + (5u * black_avg)) / 6u;
     } else {
         g_threshold = BLACK_LINE_THRESHOLD;
     }
 }
-
 static void run_calibration(void){
     unsigned char settle;
 
-    /* Phase 0: ambient (emitter OFF) */
-    IR_LED_control(IR_LED_OFF);
-    set_line(0, "CAL:AMBT  ");
-    set_line(1, "Emitter   ");
-    set_line(2, "OFF       ");
-    set_line(3, "Place:WHT ");
-    Display_Update(0,0,0,0);
-    settle = 0u;
-    while(settle < TICKS_CAL_SETTLE){
-        if(update_display_count > 0u){
-            update_display_count--;
-            update_display = TRUE;
-            settle++;
-        }
-        Display_Process();
-    }
+
     average_adc_samples(0u);  /* discard ambient */
     average_adc_samples(1u);
 
@@ -398,6 +406,41 @@ static void run_calibration(void){
     set_line(3, "Place:WHT ");
     Display_Update(0,0,0,0);
     settle = 0u;
+        while(settle < TICKS_CAL_SETTLE){
+            if(update_display_count > 0u){
+                update_display_count--;
+                update_display = TRUE;
+                settle++;
+            }
+            if(ADC_updated){
+                /* Show live L and R readings while settling */
+                char live[11];
+                unsigned int s;
+                live[0]='L';
+                s = ADC_Left_Detect;
+                live[1]=(char)('0'+s/100u); s%=100u;
+                live[2]=(char)('0'+s/10u);  s%=10u;
+                live[3]=(char)('0'+s);
+                live[4]=' ';
+                live[5]='R';
+                s = ADC_Right_Detect;
+                live[6]=(char)('0'+s/100u); s%=100u;
+                live[7]=(char)('0'+s/10u);  s%=10u;
+                live[8]=(char)('0'+s);
+                live[9]=' '; live[10]='\0';
+                set_line(3, live);
+                Display_Update(0,0,0,0);
+            }
+            Display_Process();
+        }
+    g_white_left  = average_adc_samples(0u);
+    g_white_right = average_adc_samples(1u);
+    set_line(0, "SWITCH    ");
+    set_line(1, "Emitter   ");
+    set_line(2, "ON       ");
+    set_line(3, "Place:BLACK");
+    Display_Update(0,0,0,0);
+    settle = 0u;
     while(settle < TICKS_CAL_SETTLE){
         if(update_display_count > 0u){
             update_display_count--;
@@ -406,9 +449,6 @@ static void run_calibration(void){
         }
         Display_Process();
     }
-    g_white_left  = average_adc_samples(0u);
-    g_white_right = average_adc_samples(1u);
-
     /* Phase 2: black line (emitter ON) */
     set_line(0, "CAL:BLACK ");
     set_line(1, "Move to   ");
@@ -416,14 +456,33 @@ static void run_calibration(void){
     set_line(3, "Place:BLK ");
     Display_Update(0,0,0,0);
     settle = 0u;
-    while(settle < TICKS_CAL_SETTLE * 3u){
-        if(update_display_count > 0u){
-            update_display_count--;
-            update_display = TRUE;
-            settle++;
+        while(settle < TICKS_CAL_SETTLE * 3u){
+            if(update_display_count > 0u){
+                update_display_count--;
+                update_display = TRUE;
+                settle++;
+            }
+            if(ADC_updated){
+                /* Show live L and R readings while settling */
+                char live[11];
+                unsigned int s;
+                live[0]='L';
+                s = ADC_Left_Detect;
+                live[1]=(char)('0'+s/100u); s%=100u;
+                live[2]=(char)('0'+s/10u);  s%=10u;
+                live[3]=(char)('0'+s);
+                live[4]=' ';
+                live[5]='R';
+                s = ADC_Right_Detect;
+                live[6]=(char)('0'+s/100u); s%=100u;
+                live[7]=(char)('0'+s/10u);  s%=10u;
+                live[8]=(char)('0'+s);
+                live[9]=' '; live[10]='\0';
+                set_line(3, live);
+                Display_Update(0,0,0,0);
+            }
+            Display_Process();
         }
-        Display_Process();
-    }
     g_black_left  = average_adc_samples(0u);
     g_black_right = average_adc_samples(1u);
 
@@ -442,43 +501,17 @@ static unsigned char is_black_right_raw(void){
     return (ADC_Right_Detect > g_threshold) ? TRUE : FALSE;
 }
 
-/*==============================================================================
- * Line detection – white-confirmation filtered versions
- *==============================================================================*/
-static unsigned char is_black_left_filtered(void){
-    if(is_black_left_raw()){
-        g_white_confirm_L = 0u;
-        return TRUE;
-    }
-    if(g_white_confirm_L < WHITE_CONFIRM_COUNT){
-        g_white_confirm_L++;
-        return TRUE;
-    }
-    return FALSE;
-}
 
-static unsigned char is_black_right_filtered(void){
-    if(is_black_right_raw()){
-        g_white_confirm_R = 0u;
-        return TRUE;
-    }
-    if(g_white_confirm_R < WHITE_CONFIRM_COUNT){
-        g_white_confirm_R++;
-        return TRUE;
-    }
-    return FALSE;
-}
 
 /*==============================================================================
  * get_line_state_dyn
  *==============================================================================*/
 static unsigned char get_line_state_dyn(void){
     unsigned char s = LINE_NONE;
-    if(is_black_left_filtered())  s |= LINE_LEFT;
-    if(is_black_right_filtered()) s |= LINE_RIGHT;
+    if(is_black_left_raw())  s |= LINE_LEFT;
+    if(is_black_right_raw()) s |= LINE_RIGHT;
     return s;
 }
-
 /*==============================================================================
  * line_follow_step – PWM reactive line follower  (mirrors Project 7 logic)
  *
@@ -717,25 +750,21 @@ static void parse_web_command(const char *payload){
                 g_on_pad     = FALSE;
                 MOTORS_ALL_OFF();
 
-                /* Start in the new pre-movement state */
-                g_bl_state      = BL_PRE_MOVE;
-                g_pre_move_phase = 0u;    /* sub-phase 0 = forward             */
-                g_bl_timer      = 0u;
+                g_bl_state       = BL_PRE_MOVE;
+                g_pre_move_phase = 0u;
+                g_bl_timer       = 0u;
 
                 /* Reset lap / filter state */
                 g_lap_edges        = 0u;
-                g_prev_right_black = is_black_right_filtered();
+                g_prev_right_black = is_black_right_raw();
                 g_exit_requested   = FALSE;
                 g_exit_phase       = 0u;
-                g_white_confirm_L  = 0u;
-                g_white_confirm_R  = 0u;
                 g_lost_line_count  = 0u;
 
                 set_line(0, "BL PreMove");
                 show_course_display();
                 Display_Update(0,0,0,0);
 
-                /* Start driving forward immediately */
                 MOTORS_FORWARD();
             }
             break;
@@ -838,50 +867,90 @@ static void bl_state_machine(unsigned char tick_consumed){
          *   sub-phase 0: motors forward, count ticks
          *   sub-phase 1: motor right spin, count ticks
          *--------------------------------------------------------------------*/
-        case BL_PRE_MOVE:
-            if(tick_consumed){ g_bl_timer++; }
+    case BL_PRE_MOVE:
+                if(tick_consumed){ g_bl_timer++; }
 
-            if(g_pre_move_phase == 0u){
-                /* Forward phase */
-                if(g_bl_timer >= TICKS_PRE_FORWARD){
-                    /* Switch to right-turn sub-phase */
-                    g_pre_move_phase = 1u;
-                    g_bl_timer       = 0u;
-                    MOTOR_TURN_RIGHT();   /* full spin right turn                */
-                    set_line(0, "BL RtTurn ");
-                    show_course_display();
-                    Display_Update(0,0,0,0);
+                if(g_pre_move_phase == 0u){
+                    /* Phase 0: Initial Forward Phase */
+                    if(g_bl_timer >= TICKS_PRE_FORWARD){
+                        g_pre_move_phase = 1u;
+                        g_bl_timer       = 0u;
+                        MOTOR_TURN_RIGHT();
+                        set_line(0, "BL RtTurn ");
+                        show_course_display();
+                        Display_Update(0,0,0,0);
+                    }
                 }
-                /* else: keep driving forward (MOTORS_FORWARD set on entry) */
+                else if (g_pre_move_phase == 1u){
+                    /* Phase 1: Right-turn phase */
+                    if(g_bl_timer >= TICKS_PRE_RIGHT_TURN){
+                        g_pre_move_phase = 2u;
+                        g_bl_timer       = 0u;
 
-            } else {
-                /* Right-turn phase */
-                if(g_bl_timer >= TICKS_PRE_RIGHT_TURN){
-                    /* Pre-movement complete – enter line intercept */
-                    g_bl_timer = 0u;
-                    g_bl_state = BL_START;
-                    MOTORS_FORWARD();    /* drive toward the black line         */
-                    set_line(0, "BL Start  ");
-                    show_course_display();
-                    Display_Update(0,0,0,0);
+                        /* NEW: Go straight after the right turn */
+                        MOTORS_FORWARD();
+                        set_line(0, "BL Strt 1s");
+                        show_course_display();
+                        Display_Update(0,0,0,0);
+                    }
                 }
-            }
-            break;
+                else if (g_pre_move_phase == 2u){
+                    /* Phase 2: Straight for 1 second (5 ticks * 200ms = 1000ms) */
+                    if(g_bl_timer >= 12u){
+                        g_pre_move_phase = 3u;
+                        g_bl_timer       = 0u;
 
+                        /* Original Reverse Right Turn */
+                        MOTORS_REVERSE_RIGHT();
+                        set_line(0, "RevRtTurn ");
+                        show_course_display();
+                        Display_Update(0,0,0,0);
+                    }
+                }
+                else if (g_pre_move_phase == 3u){
+                    /* Phase 3: Reverse right turn phase */
+                    if(g_bl_timer >= TICKS_PRE_RIGHT_REVERSE_TURN){
+                        g_bl_timer             = 0u;
+                        g_bl_state             = BL_START;
+                        g_bl_start_white_ticks = 0u;
+                        MOTORS_FORWARD();
+                        set_line(0, "BL Start  ");
+                        show_course_display();
+                        Display_Update(0,0,0,0);
+                    }
+                }
+                break;
         /*----------------------------------------------------------------------
          * BL_START – drive forward until either sensor detects line
          *--------------------------------------------------------------------*/
         case BL_START:
-            if(get_line_state_dyn() != LINE_NONE){
-                MOTORS_ALL_OFF();
-                g_bl_state = BL_PAUSE1;
-                g_bl_timer = 0u;
-                set_line(0, "Intercept ");
-                show_course_display();
-                Display_Update(0,0,0,0);
-            }
-            break;
-
+                    /*------------------------------------------------------------------
+                     * Phase A: accumulate 1 s of continuous white before arming
+                     *          the black-line detector.
+                     * Phase B: once white is confirmed, stop on first black detection.
+                     *----------------------------------------------------------------*/
+                    if(g_bl_start_white_ticks < TICKS_WHITE_CONFIRM){
+                        /* Still building white confirmation */
+                        if(get_line_state_dyn() == LINE_NONE){
+                            /* Both sensors see white – count this tick */
+                            if(tick_consumed){ g_bl_start_white_ticks++; }
+                        } else {
+                            /* Saw black before 1 s of white – reset counter */
+                            g_bl_start_white_ticks = 0u;
+                        }
+                    } else {
+                        /* White confirmed – now watch for the black line */
+                        if(get_line_state_dyn() != LINE_NONE){
+                            MOTORS_ALL_OFF();
+                            g_bl_state = BL_PAUSE1;
+                            g_bl_timer = 0u;
+                            g_bl_start_white_ticks = 0u;   /* reset for next run    */
+                            set_line(0, "Intercept ");
+                            show_course_display();
+                            Display_Update(0,0,0,0);
+                        }
+                    }
+                    break;
         /*----------------------------------------------------------------------
          * BL_PAUSE1 – 15 s mandatory stop
          *--------------------------------------------------------------------*/
@@ -941,7 +1010,7 @@ static void bl_state_machine(unsigned char tick_consumed){
             line_follow_step();   /* PWM mode; pwm_motors_enable() called on entry to this state */
             if(tick_consumed){ g_bl_timer++; }
             {
-                unsigned char cur = is_black_right_filtered();
+                unsigned char cur = is_black_right_raw();
                 if((cur == TRUE) && (g_prev_right_black == FALSE)){
                     g_lap_edges++;
                 }
@@ -953,7 +1022,7 @@ static void bl_state_machine(unsigned char tick_consumed){
                 g_bl_state  = BL_PAUSE3;
                 g_bl_timer  = 0u;
                 g_lap_edges = 0u;
-                g_prev_right_black = is_black_right_filtered();
+                g_prev_right_black = is_black_right_raw();
                 set_line(0, "BL Circle ");
                 show_course_display();
                 Display_Update(0,0,0,0);
@@ -981,10 +1050,8 @@ static void bl_state_machine(unsigned char tick_consumed){
                 g_bl_timer  = 0u;
                 g_bl_state  = BL_CIRCLE;
                 g_lap_edges = 0u;
-                g_white_confirm_L  = 0u;
-                g_white_confirm_R  = 0u;
                 g_lost_line_count  = 0u;
-                g_prev_right_black = is_black_right_filtered();
+                g_prev_right_black = is_black_right_raw();
                 pwm_motors_enable();   /* switch to TB3 PWM for circle following */
             }
             break;
@@ -995,7 +1062,7 @@ static void bl_state_machine(unsigned char tick_consumed){
         case BL_CIRCLE:
             line_follow_step();
             {
-                unsigned char cur = is_black_right_filtered();
+                unsigned char cur = is_black_right_raw();
                 if((cur == TRUE) && (g_prev_right_black == FALSE)){
                     g_lap_edges++;
                 }
@@ -1125,31 +1192,88 @@ void main(void){
      * Show "Press SW1 / to Calibrate" and wait.  Continue to drain IOT
      * messages while waiting so the WiFi handshake completes.
      *========================================================================*/
-    sw1_pressed = FALSE;   /* clear any spurious press from startup             */
-    set_line(0, "Press SW1 ");
-    set_line(1, "to        ");
-    set_line(2, "Calibrate ");
-    set_line(3, ip_oct34);
-    Display_Update(0,0,0,0);
+//    sw1_pressed = FALSE;   /* clear any spurious press from startup             */
+//    set_line(0, "Press SW1 ");
+//    set_line(1, "to        ");
+//    set_line(2, "Calibrate ");
+//    set_line(3, ip_oct34);
+//    Display_Update(0,0,0,0);
+//
+//    while(!sw1_pressed){
+//        if(update_display_count > 0u){
+//            update_display_count--;
+//            update_display = TRUE;
+//        }
+//        Display_Process();
+//        while(iot_msg_ready[iot_rx_read_idx]){
+//            process_iot_msg();
+//        }
+//        process_fram_cmd();
+//    }
+//    sw1_pressed = FALSE;   /* consume the press                                 */
+//
+//    /* ── Calibration ── */
+//    run_calibration();
 
-    while(!sw1_pressed){
-        if(update_display_count > 0u){
-            update_display_count--;
-            update_display = TRUE;
-        }
-        Display_Process();
-        while(iot_msg_ready[iot_rx_read_idx]){
-            process_iot_msg();
-        }
-        process_fram_cmd();
-    }
-    sw1_pressed = FALSE;   /* consume the press                                 */
+//    /* ── Show calibrated values briefly (3 s) ── */
+//        {
+//            char cal_line[11];
+//            unsigned int s;
+//
+//            /* Line 0: white left / right */
+//            cal_line[0]='W'; cal_line[1]='L'; cal_line[2]=':';
+//            s = g_white_left;
+//            cal_line[3]=(char)('0'+s/1000u); s%=1000u;
+//            cal_line[4]=(char)('0'+s/100u);  s%=100u;
+//            cal_line[5]=(char)('0'+s/10u);   s%=10u;
+//            cal_line[6]=(char)('0'+s);
+//            cal_line[7]=' '; cal_line[8]=' '; cal_line[9]=' '; cal_line[10]='\0';
+//            set_line(0, cal_line);
+//
+//            cal_line[0]='W'; cal_line[1]='R'; cal_line[2]=':';
+//            s = g_white_right;
+//            cal_line[3]=(char)('0'+s/1000u); s%=1000u;
+//            cal_line[4]=(char)('0'+s/100u);  s%=100u;
+//            cal_line[5]=(char)('0'+s/10u);   s%=10u;
+//            cal_line[6]=(char)('0'+s);
+//            cal_line[7]=' '; cal_line[8]=' '; cal_line[9]=' '; cal_line[10]='\0';
+//            set_line(1, cal_line);
+//
+//            cal_line[0]='B'; cal_line[1]='L'; cal_line[2]=':';
+//            s = g_black_left;
+//            cal_line[3]=(char)('0'+s/1000u); s%=1000u;
+//            cal_line[4]=(char)('0'+s/100u);  s%=100u;
+//            cal_line[5]=(char)('0'+s/10u);   s%=10u;
+//            cal_line[6]=(char)('0'+s);
+//            cal_line[7]=' '; cal_line[8]=' '; cal_line[9]=' '; cal_line[10]='\0';
+//            set_line(2, cal_line);
+//
+//            cal_line[0]='B'; cal_line[1]='R'; cal_line[2]=':';
+//            s = g_black_right;
+//            cal_line[3]=(char)('0'+s/1000u); s%=1000u;
+//            cal_line[4]=(char)('0'+s/100u);  s%=100u;
+//            cal_line[5]=(char)('0'+s/10u);   s%=10u;
+//            cal_line[6]=(char)('0'+s);
+//            cal_line[7]=' '; cal_line[8]=' '; cal_line[9]=' '; cal_line[10]='\0';
+//            set_line(3, cal_line);
+//
+//            Display_Update(0,0,0,0);
+//
+//            /* Hold for 3 s (15 × 200 ms ticks) */
+//            state_timer = 0u;
+//            while(state_timer < 30u){
+//                if(update_display_count > 0u){
+//                    update_display_count--;
+//                    update_display = TRUE;
+//                    state_timer++;
+//                }
+//                Display_Process();
+//                while(iot_msg_ready[iot_rx_read_idx]){ process_iot_msg(); }
+//            }
+//        }
 
-    /* ── Calibration ── */
-    run_calibration();
-
-    /* ── Show "Waiting for input" ── */
-    show_waiting_display();
+        /* ── Show "Waiting for input" ── */
+        show_waiting_display();
 
     /*==========================================================================
      * Main loop
