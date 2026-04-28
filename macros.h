@@ -134,7 +134,7 @@
 #define TICKS_ALIGN_TIMEOUT     (40u)
 
 
-#define TICKS_EXIT_DRIVE        (8u)
+#define TICKS_EXIT_DRIVE        (16u)
 /*  Settle ticks after toggling emitter during calibration (3 = 600 ms).       */
 #define TICKS_CAL_SETTLE        (15u)  /* 15 × 200ms = 3s per phase            */
 
