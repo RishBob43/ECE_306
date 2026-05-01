@@ -172,15 +172,16 @@ static void pwm_motors_disable(void){
 /*==============================================================================
  * Timing constants (1 tick = 200 ms from TB0 CCR0)
  *==============================================================================*/
-#define TICKS_15_SEC            (50u)   /* 15 s mandatory pause                 */
-#define TICKS_PRE_FORWARD       (32u)    /* 1.6 s straight forward before arc    */
+#define TICKS_15_SEC            (20u)   /* 15 s mandatory pause                 */
+#define TICKS_PRE_FORWARD       (30u)    /* 1.6 s straight forward before arc    */
 #define TICKS_STRAIGHTEN        (7u)    /* 1 s right-wheel reverse to straighten*/
 #define TICKS_EXIT_TURN         (10u)   /* ~2 s exit spin                       */
 #define TICKS_CAL_SETTLE        (15u)   /* 3 s settle per calibration phase     */
 #define SPLASH_TICKS            (25u)   /* 5 s splash                           */
 // Around line ~130, add this constant next to the others:
 #define TICKS_PRE_ARC           (10u)   /* 3 s blind arc before white sensing    */
-#define TICKS_PRE_SPIN          (3u)    /* 0.6 s in-place CW spin in BL_PRE_MOVE */
+#define TICKS_PRE_SPIN          (4u)    /* 0.6 s in-place CW spin in BL_PRE_MOVE */
+#define TICKS_PRE_WHITE_DELAY   (0u)    /* 1 s forward drive before white check  */
 /*==============================================================================
  * Calibration
  *==============================================================================*/
@@ -207,6 +208,7 @@ static unsigned int  g_threshold       = BLACK_LINE_THRESHOLD;
 /* Upper threshold: ADC reading must be AT OR BELOW this to count as white.
    Initialised to 0 (no calibration yet); set by update_dynamic_threshold(). */
 static unsigned int  g_white_threshold = 0u;
+static unsigned int  g_ping_ticks = 0u;
 
 /*==============================================================================
  * Module globals – autonomous
@@ -217,12 +219,15 @@ static unsigned char g_lap_edges        = 0u;
 static unsigned char g_prev_right_black = FALSE;
 static unsigned char g_exit_phase       = 0u;
 static unsigned char g_exit_requested   = FALSE;
-
+static unsigned char g_pre_move_left = FALSE;  /* TRUE = arc left, FALSE = arc right */
+static unsigned char g_low_power = FALSE;
 /* Add these at the top of the file with the other static globals (~line 221) */
 static unsigned int g_last_left_fwd  = LF_FULL;
 static unsigned int g_last_right_fwd = LF_FULL;
 static unsigned int g_last_left_rev  = 0u;
 static unsigned int g_last_right_rev = 0u;
+static unsigned char g_motor_direction  = 'S';
+static unsigned int  g_motor_remaining  = 0u;
 
 /* White-tick counter used by BL_PRE_MOVE to confirm 1 s of open white */
 static unsigned char g_pre_white_ticks  = 0u;
@@ -564,15 +569,15 @@ static void line_follow_step(void){
         case LINE_BOTH:
             LEFT_REVERSE_SPEED  = 0;
             RIGHT_REVERSE_SPEED = 0;
-            LEFT_FORWARD_SPEED  = 40000;
-            RIGHT_FORWARD_SPEED = 30000;
+            LEFT_FORWARD_SPEED  = 45000;
+            RIGHT_FORWARD_SPEED = 35000;
             g_lost_line_count = 0u;
             break;
 
         case LINE_RIGHT:
             LEFT_FORWARD_SPEED  = 0;
             RIGHT_REVERSE_SPEED = 0;
-            LEFT_REVERSE_SPEED  = 20000;
+            LEFT_REVERSE_SPEED  = 30000;
             RIGHT_FORWARD_SPEED = 40000;
             g_lost_line_count = 0u;
             break;
@@ -581,7 +586,7 @@ static void line_follow_step(void){
             LEFT_REVERSE_SPEED  = 0;
             RIGHT_FORWARD_SPEED = 0;
             LEFT_FORWARD_SPEED  = 50000;
-            RIGHT_REVERSE_SPEED = 30000;
+            RIGHT_REVERSE_SPEED = 20000;
             g_lost_line_count = 0u;
             break;
 
@@ -674,12 +679,35 @@ static void parse_cifsr(const char *line){
     }
     center_string(ip, j, ip_oct12);
 }
+static void enter_low_power(void){
+    pwm_motors_disable();        /* stop TB3 CCRs before touching GPIO        */
+    MOTORS_ALL_OFF();
+    IR_LED_control(IR_LED_OFF);
+    Backlite_control(0);
+    set_line(0, "Low Power ");
+    set_line(1, "Sleeping. ");
+    set_line(2, "          ");
+    set_line(3, "Send Y    ");
+    Display_Update(0,0,0,0);
+    g_low_power        = TRUE;
+    g_motor_direction  = 'S';
+    g_motor_remaining  = 0u;
+}
 
+static void exit_low_power(void){
+    Backlite_control(1);
+    IR_LED_control(IR_LED_ON);   /* restore IR emitter                        */
+    g_low_power        = FALSE;
+    g_motor_direction  = 'S';    /* ensure clean motor state                  */
+    g_motor_remaining  = 0u;
+    g_autonomous       = FALSE;  /* reset autonomous in case it was mid-run   */
+    g_bl_state         = BL_NONE;
+    show_waiting_display();
+}
 /*==============================================================================
  * parse_web_command
  *==============================================================================*/
-static unsigned char g_motor_direction  = 'S';
-static unsigned int  g_motor_remaining  = 0u;
+
 
 static void parse_web_command(const char *payload){
     unsigned int i = 0u, consumed = 0u, units = 0u;
@@ -744,14 +772,13 @@ static void parse_web_command(const char *payload){
             break;
 
         case 'G': case 'g':
-            /*------------------------------------------------------------------
-             * Go autonomous – begin BL_PRE_MOVE.
-             * Switch to PWM mode immediately so the arc CCR writes take effect.
-             *----------------------------------------------------------------*/
             if(!g_autonomous){
                 g_autonomous = TRUE;
                 g_on_pad     = FALSE;
                 MOTORS_ALL_OFF();
+
+                /* Check for optional direction suffix: ^1234GL = left, ^1234G = right */
+                g_pre_move_left = (payload[i] == 'L' || payload[i] == 'l') ? TRUE : FALSE;
 
                 g_bl_state        = BL_FORWARD;
                 g_bl_timer        = 0u;
@@ -767,12 +794,18 @@ static void parse_web_command(const char *payload){
                 show_course_display();
                 Display_Update(0,0,0,0);
 
-                /* Enable PWM and drive straight */
                 pwm_motors_enable();
                 LEFT_FORWARD_SPEED  = LF_FULL;
                 RIGHT_FORWARD_SPEED = LF_FULL;
                 LEFT_REVERSE_SPEED  = 0;
                 RIGHT_REVERSE_SPEED = 0;
+            }
+            break;
+        case 'Y': case 'y':
+            if(g_low_power){
+                exit_low_power();
+            } else {
+                enter_low_power();
             }
             break;
 
@@ -852,7 +885,7 @@ static void execute_motor_unit(void){
         case 'W': case 'w': MOTOR_IOT_LEFT();       break;  /* CCW spin  */
         case 'Q': case 'q': MOTORS_REVERSE_RIGHT(); break;  /* R rev only */
         case 'Z': case 'z': MOTORS_REVERSE_LEFT();  break;  /* L rev only */
-        default:            MOTORS_ALL_OFF();        break;
+        default:            MOTORS_ALL_OFF();       break;
     }
 
     if(tick_200ms){
@@ -875,31 +908,29 @@ static void bl_state_machine(unsigned char tick_consumed){
          *              before beginning the rightward arc.
          * PWM mode is already active (enabled in the 'G' command handler).
          *--------------------------------------------------------------------*/
-        case BL_FORWARD:
-            /* Hold straight output every pass */
-            LEFT_FORWARD_SPEED  = LF_FULL;
-            RIGHT_FORWARD_SPEED = 10000;
-            LEFT_REVERSE_SPEED  = 0;
-            RIGHT_REVERSE_SPEED = 0;
+    case BL_FORWARD:
+        LEFT_FORWARD_SPEED  = g_pre_move_left ? 10000 : LF_FULL;
+        RIGHT_FORWARD_SPEED = g_pre_move_left ? LF_FULL : 16000;
+        LEFT_REVERSE_SPEED  = 0;
+        RIGHT_REVERSE_SPEED = 0;
 
-            if(tick_consumed){ g_bl_timer++; }
+        if(tick_consumed){ g_bl_timer++; }
 
-            if(g_bl_timer >= TICKS_PRE_FORWARD){
-                g_bl_timer        = 0u;
-                g_pre_white_ticks = 0u;
-                g_bl_state        = BL_PRE_MOVE;
+        if(g_bl_timer >= TICKS_PRE_FORWARD){
+            g_bl_timer        = 0u;
+            g_pre_white_ticks = 0u;
+            g_bl_state        = BL_PRE_MOVE;
 
-                /* Start the arc: left full, right slowed -> curves right */
-                LEFT_FORWARD_SPEED  = LF_FULL;
-                RIGHT_FORWARD_SPEED = LF_TURN;
-                LEFT_REVERSE_SPEED  = 0;
-                RIGHT_REVERSE_SPEED = 0;
+            LEFT_FORWARD_SPEED  = g_pre_move_left ?      0 : 50000;
+            RIGHT_FORWARD_SPEED = g_pre_move_left ?  50000 :      0;
+            LEFT_REVERSE_SPEED  = g_pre_move_left ?  50000 :      0;
+            RIGHT_REVERSE_SPEED = g_pre_move_left ?      0 : 50000;
 
-                set_line(0, "BL PreMove");
-                show_course_display();
-                Display_Update(0,0,0,0);
-            }
-            break;
+            set_line(0, "BL PreMove");
+            show_course_display();
+            Display_Update(0,0,0,0);
+        }
+        break;
 
         /*----------------------------------------------------------------------
          * BL_PRE_MOVE – two sub-phases:
@@ -919,23 +950,23 @@ static void bl_state_machine(unsigned char tick_consumed){
             if(tick_consumed){ g_bl_timer++; }
 
             if(g_bl_timer <= TICKS_PRE_SPIN){
-                /*------------------------------------------------------------------
-                 * Sub-phase 1: in-place clockwise spin for 0.6 s (3 x 200 ms).
-                 *   Left wheel forward, right wheel reverse -> spins CW in place.
-                 *------------------------------------------------------------------*/
-                LEFT_FORWARD_SPEED  = 50000;
+                /* Sub-phase 1: in-place spin
+                 * Right arc (default): left fwd + right rev = CW
+                 * Left  arc:           right fwd + left rev = CCW               */
+                LEFT_FORWARD_SPEED  = g_pre_move_left ?      0 : 50000;
+                RIGHT_FORWARD_SPEED = g_pre_move_left ?  50000 :      0;
+                LEFT_REVERSE_SPEED  = g_pre_move_left ?  50000 :      0;
+                RIGHT_REVERSE_SPEED = g_pre_move_left ?      0 : 50000;
+            } else if(g_bl_timer <= TICKS_PRE_SPIN + TICKS_PRE_WHITE_DELAY){
+                /* Sub-phase 2: fully stopped 5 s pause before white check */
+                LEFT_FORWARD_SPEED  = 0;
                 RIGHT_FORWARD_SPEED = 0;
                 LEFT_REVERSE_SPEED  = 0;
-                RIGHT_REVERSE_SPEED = 50000;
+                RIGHT_REVERSE_SPEED = 0;
             } else {
-                /*------------------------------------------------------------------
-                 * Sub-phase 2: drive forward while checking for white.
-                 *   Both wheels forward at full speed.
-                 *   Count consecutive white ticks; once TICKS_WHITE_CONFIRM
-                 *   ticks of white are seen, transition to BL_START.
-                 *------------------------------------------------------------------*/
+                /* Sub-phase 3: drive forward checking for white */
                 LEFT_FORWARD_SPEED  = 40000;
-                RIGHT_FORWARD_SPEED = 40000;
+                RIGHT_FORWARD_SPEED = 30000;
                 LEFT_REVERSE_SPEED  = 0;
                 RIGHT_REVERSE_SPEED = 0;
 
@@ -1047,7 +1078,7 @@ static void bl_state_machine(unsigned char tick_consumed){
             /* Hold the left-reverse turn output every pass */
             LEFT_FORWARD_SPEED  = 0;
             RIGHT_FORWARD_SPEED = 25000;
-            LEFT_REVERSE_SPEED  = 25000;
+            LEFT_REVERSE_SPEED  = 50000;
             RIGHT_REVERSE_SPEED = 0;
 
             if(get_line_state_dyn() == LINE_BOTH){
@@ -1365,38 +1396,54 @@ void main(void){
         if(update_display_count > 0u){
             update_display_count--;
             update_display = TRUE;
-            tick_200ms     = TRUE;
+            tick_200ms = TRUE;
 
-            if(g_course_active && g_bl_state != BL_STOP){
+            if(g_course_active && g_bl_state != BL_STOP && !g_low_power){
                 g_sec_ticks++;
                 if(g_sec_ticks >= 5u){
                     g_sec_ticks = 0u;
                     if(g_course_secs < 999u){ g_course_secs++; }
                 }
             }
+            if(!g_low_power){
+                g_ping_ticks++;
+                if(g_ping_ticks >= 25u){
+                    g_ping_ticks = 0u;
+                    UCA0_Transmit_String("AT+PING=\"8.8.8.8\"\r\n", 19u);
+                }
+            }
         }
 
         Display_Process();
 
+        if(g_low_power){
+            /* Drain any message that just arrived (e.g. the 'Y' wake command) */
+            while(iot_msg_ready[iot_rx_read_idx]){
+                process_iot_msg();
+            }
+            process_fram_cmd();
+            /* If still in low power after draining, spin until next UART RX wakes us.
+             * We do NOT use LPM0 because restoring SR from the ISR stack would
+             * re-assert the LPM bits before we can check g_low_power.             */
+            continue;
+        }
+
+        /* Normal (awake) path */
         while(iot_msg_ready[iot_rx_read_idx]){
             process_iot_msg();
         }
-
         process_fram_cmd();
 
         if(g_autonomous){
             bl_state_machine(tick_200ms);
-
             if(tick_200ms && g_bl_state != BL_STOP){
                 show_course_display();
                 Display_Update(0,0,0,0);
             }
-
         } else {
             if(g_motor_remaining > 0u){
                 execute_motor_unit();
             }
-
             if(tick_200ms && g_course_active){
                 show_course_display();
                 Display_Update(0,0,0,0);
@@ -1404,4 +1451,5 @@ void main(void){
         }
 
     } /* while(ALWAYS) */
+
 }
